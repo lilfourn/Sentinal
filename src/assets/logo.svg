@@ -1,0 +1,21 @@
+<svg width="256" height="256" viewBox="0 0 256 256" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <rect x="28" y="28" width="200" height="200" rx="48" fill="#18181b"/>
+  <rect x="28" y="28" width="200" height="200" rx="48" stroke="#27272a" stroke-width="8"/>
+
+  <path d="M28 76C28 49.4903 49.4903 28 76 28H180C206.51 28 228 49.4903 228 76V88H28V76Z" fill="#27272a"/>
+
+  <circle cx="128" cy="148" r="32" fill="#F97316"/>
+  <circle cx="128" cy="148" r="32" stroke="#F97316" stroke-opacity="0.4" stroke-width="16"/>
+
+  <circle cx="128" cy="148" r="12" fill="#FFFFFF"/>
+  <rect x="126" y="116" width="4" height="64" rx="2" fill="#7c2d12" fill-opacity="0.5"/>
+  <rect x="96" y="146" width="64" height="4" rx="2" fill="#7c2d12" fill-opacity="0.5"/>
+
+  <defs>
+    <linearGradient id="glass-shine" x1="28" y1="28" x2="228" y2="228" gradientUnits="userSpaceOnUse">
+      <stop stop-color="white" stop-opacity="0.1"/>
+      <stop offset="0.6" stop-color="white" stop-opacity="0"/>
+    </linearGradient>
+  </defs>
+  <rect x="28" y="28" width="200" height="200" rx="48" fill="url(#glass-shine)"/>
+</svg>

@@ -1,0 +1,75 @@
+[package]
+name = "tauri-app"
+version = "0.1.0"
+description = "A Tauri App"
+authors = ["you"]
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[lib]
+# The `_lib` suffix may seem redundant but it is necessary
+# to make the lib name unique and wouldn't conflict with the bin name.
+# This seems to be only an issue on Windows, see https://github.com/rust-lang/cargo/issues/8519
+name = "tauri_app_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = ["macos-private-api"] }
+tauri-plugin-opener = "2"
+tauri-plugin-fs = "2"
+tauri-plugin-shell = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# File system watching
+notify = "7"
+notify-debouncer-full = "0.4"
+
+# Safe deletion (cross-platform trash)
+trash = "5"
+
+# HTTP client for AI APIs
+reqwest = { version = "0.12", features = ["json", "rustls-tls"] }
+
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+
+# Platform directories (~/Downloads, etc.)
+dirs = "6"
+
+# Recursive directory traversal
+walkdir = "2"
+
+# MIME type detection
+mime_guess = "2"
+
+# Error handling
+thiserror = "2"
+
+# Timestamps
+chrono = { version = "0.4", features = ["serde"] }
+
+# Unique IDs
+uuid = { version = "1", features = ["v4", "serde"] }
+
+# Secure credential storage (keychain/credential manager)
+keyring = "3"
+
+# Regex for command validation
+regex = "1"
+
+# Safe shell command execution for AI agent tools
+duct = "0.13"
+
+# Embedded database for usage tracking
+sled = "0.34"
+
+# Thumbnail generation
+image = "0.25"
+base64 = "0.22"
+sha2 = "0.10"
+
