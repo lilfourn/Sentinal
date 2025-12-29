@@ -1,5 +1,6 @@
 import { clsx, type ClassValue } from 'clsx';
 import { twMerge } from 'tailwind-merge';
+import { invoke } from '@tauri-apps/api/core';
 
 /** Merge Tailwind classes with proper precedence */
 export function cn(...inputs: ClassValue[]) {
@@ -108,9 +109,16 @@ export function isThumbnailSupported(extension: string | null): boolean {
   return [
     // Images
     'jpg', 'jpeg', 'png', 'gif', 'webp', 'bmp', 'ico', 'tiff', 'tif',
+    // SVG (vector graphics)
+    'svg',
     // Videos (requires ffmpeg)
     'mp4', 'mov', 'avi', 'mkv', 'webm', 'wmv', 'flv',
     // PDF
     'pdf'
   ].includes(ext);
+}
+
+/** Open a file with the system's default application */
+export async function openFile(path: string): Promise<void> {
+  await invoke('open_file', { path });
 }

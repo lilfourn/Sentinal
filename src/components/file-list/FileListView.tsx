@@ -1,13 +1,16 @@
 import { useRef, useCallback, useEffect, useState } from 'react';
 import { useVirtualizer } from '@tanstack/react-virtual';
 import { invoke } from '@tauri-apps/api/core';
+import { useQueryClient } from '@tanstack/react-query';
 import { FileRow } from './FileRow';
+import { NewItemRow } from './NewItemRow';
 import { SelectionOverlay } from './SelectionOverlay';
-import { ContextMenu, buildFileContextMenuItems, type ContextMenuPosition } from '../ContextMenu/ContextMenu';
+import { ContextMenu, buildFileContextMenuItems, buildBackgroundContextMenuItems, type ContextMenuPosition } from '../ContextMenu/ContextMenu';
 import { useNavigationStore } from '../../stores/navigation-store';
 import { useSelectionStore } from '../../stores/selection-store';
 import { useOrganizeStore } from '../../stores/organize-store';
 import { showSuccess, showError } from '../../stores/toast-store';
+import { openFile } from '../../lib/utils';
 import type { FileEntry } from '../../types/file';
 import type { SelectionRect } from '../../hooks/useMarqueeSelection';
 
@@ -23,7 +26,8 @@ const HEADER_HEIGHT = 30;
 
 export function FileListView({ entries }: FileListViewProps) {
   const parentRef = useRef<HTMLDivElement>(null);
-  const { navigateTo, setQuickLookPath } = useNavigationStore();
+  const queryClient = useQueryClient();
+  const { navigateTo, setQuickLookPath, currentPath, showHidden } = useNavigationStore();
   const {
     selectedPaths,
     focusedPath,
@@ -31,8 +35,18 @@ export function FileListView({ entries }: FileListViewProps) {
     selectRange,
     clearSelection,
     selectMultiple,
+    editingPath,
+    creatingType,
+    creatingInPath,
+    startEditing,
+    stopEditing,
+    startCreating,
+    stopCreating,
   } = useSelectionStore();
   const { startOrganize } = useOrganizeStore();
+
+  // Check if we should show the new item row in this directory
+  const isCreatingHere = creatingType !== null && creatingInPath === currentPath;
 
   // Marquee selection state
   const [isDragging, setIsDragging] = useState(false);
@@ -41,18 +55,84 @@ export function FileListView({ entries }: FileListViewProps) {
   const [dragModifiers, setDragModifiers] = useState({ meta: false, shift: false });
   const justFinishedDraggingRef = useRef(false);
 
-  // Context menu state
+  // Context menu state (for file/folder items)
   const [contextMenu, setContextMenu] = useState<{
     position: ContextMenuPosition;
     entry: FileEntry;
   } | null>(null);
 
+  // Background context menu state (for empty space)
+  const [backgroundContextMenu, setBackgroundContextMenu] = useState<ContextMenuPosition | null>(null);
+
+  // Total count includes the new item row if we're creating
+  const totalCount = entries.length + (isCreatingHere ? 1 : 0);
+
   const virtualizer = useVirtualizer({
-    count: entries.length,
+    count: totalCount,
     getScrollElement: () => parentRef.current,
     estimateSize: () => ROW_HEIGHT,
     overscan: 10,
   });
+
+  // Refresh directory after changes
+  const refreshDirectory = useCallback(() => {
+    queryClient.invalidateQueries({ queryKey: ['directory', currentPath, showHidden] });
+  }, [queryClient, currentPath, showHidden]);
+
+  // Handle rename confirmation
+  const handleRenameConfirm = useCallback(
+    async (oldPath: string, newName: string) => {
+      const parentDir = oldPath.substring(0, oldPath.lastIndexOf('/'));
+      const newPath = `${parentDir}/${newName}`;
+
+      try {
+        await invoke('rename_file', { oldPath, newPath });
+        showSuccess('Renamed', `${oldPath.split('/').pop()} → ${newName}`);
+        stopEditing();
+        refreshDirectory();
+        // Select the renamed item
+        select(newPath, false);
+      } catch (error) {
+        showError('Rename failed', String(error));
+      }
+    },
+    [stopEditing, refreshDirectory, select]
+  );
+
+  // Handle creating a new file or folder
+  const handleCreateConfirm = useCallback(
+    async (name: string) => {
+      if (!creatingType || !creatingInPath) return;
+
+      const newPath = `${creatingInPath}/${name}`;
+
+      try {
+        if (creatingType === 'folder') {
+          await invoke('create_directory', { path: newPath });
+          showSuccess('Created folder', name);
+        } else {
+          await invoke('create_file', { path: newPath });
+          showSuccess('Created file', name);
+        }
+        stopCreating();
+        refreshDirectory();
+        // Select the new item after a brief delay to let the directory refresh
+        setTimeout(() => select(newPath, false), 100);
+      } catch (error) {
+        showError(`Failed to create ${creatingType}`, String(error));
+      }
+    },
+    [creatingType, creatingInPath, stopCreating, refreshDirectory, select]
+  );
+
+  // Handle cancel
+  const handleCreateCancel = useCallback(() => {
+    stopCreating();
+  }, [stopCreating]);
+
+  const handleRenameCancel = useCallback(() => {
+    stopEditing();
+  }, [stopEditing]);
 
   // Calculate selection rectangle
   const getSelectionRect = useCallback((): SelectionRect | null => {
@@ -110,9 +190,11 @@ export function FileListView({ entries }: FileListViewProps) {
   );
 
   const handleDoubleClick = useCallback(
-    (entry: FileEntry) => {
+    async (entry: FileEntry) => {
       if (entry.isDirectory) {
         navigateTo(entry.path);
+      } else {
+        await openFile(entry.path);
       }
     },
     [navigateTo]
@@ -125,8 +207,17 @@ export function FileListView({ entries }: FileListViewProps) {
     if (e.target === e.currentTarget) {
       clearSelection();
       setContextMenu(null);
+      setBackgroundContextMenu(null);
     }
   }, [clearSelection]);
+
+  // Handle right-click on empty space (background)
+  // File items call e.stopPropagation(), so only background clicks reach here
+  const handleBackgroundContextMenu = useCallback((e: React.MouseEvent) => {
+    e.preventDefault();
+    setContextMenu(null); // Close file context menu if open
+    setBackgroundContextMenu({ x: e.clientX, y: e.clientY });
+  }, []);
 
   const handleContainerMouseDown = useCallback((e: React.MouseEvent) => {
     // Only start drag on left button, on container background
@@ -208,12 +299,36 @@ export function FileListView({ entries }: FileListViewProps) {
     }
   }, []);
 
-  // Keyboard navigation
+  // Keyboard navigation and shortcuts
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
-      if (!entries.length) return;
+      // Don't handle keys if we're editing
+      if (editingPath || isCreatingHere) {
+        if (e.key === 'Escape') {
+          e.preventDefault();
+          stopEditing();
+          stopCreating();
+        }
+        return;
+      }
 
-      const currentIndex = entries.findIndex((e) => e.path === focusedPath);
+      const currentIndex = entries.findIndex((entry) => entry.path === focusedPath);
+
+      // New Folder: Cmd+Shift+N
+      if ((e.metaKey || e.ctrlKey) && e.shiftKey && e.key === 'N') {
+        e.preventDefault();
+        useSelectionStore.getState().startCreating('folder', currentPath);
+        return;
+      }
+
+      // New File: Cmd+N (without shift)
+      if ((e.metaKey || e.ctrlKey) && !e.shiftKey && e.key === 'n') {
+        e.preventDefault();
+        useSelectionStore.getState().startCreating('file', currentPath);
+        return;
+      }
+
+      if (!entries.length) return;
 
       switch (e.key) {
         case 'ArrowDown': {
@@ -247,15 +362,39 @@ export function FileListView({ entries }: FileListViewProps) {
         case 'Enter': {
           e.preventDefault();
           const currentEntry = entries[currentIndex];
-          if (currentEntry?.isDirectory) {
+          if (!currentEntry) break;
+
+          // If it's a folder and only one selected, navigate into it
+          if (currentEntry.isDirectory && selectedPaths.size === 1) {
             navigateTo(currentEntry.path);
+          } else if (selectedPaths.size === 1) {
+            // Single file selected - start renaming
+            startEditing(currentEntry.path);
+          }
+          break;
+        }
+        case 'F2': {
+          // F2 to rename (Windows/Linux convention)
+          e.preventDefault();
+          if (selectedPaths.size === 1 && focusedPath) {
+            startEditing(focusedPath);
+          }
+          break;
+        }
+        case 'Backspace':
+        case 'Delete': {
+          // Cmd+Backspace to delete
+          if (e.metaKey || e.ctrlKey) {
+            e.preventDefault();
+            const selectedEntries = entries.filter((entry) => selectedPaths.has(entry.path));
+            selectedEntries.forEach((entry) => handleMoveToTrash(entry.path));
           }
           break;
         }
         case 'a':
           if (e.metaKey || e.ctrlKey) {
             e.preventDefault();
-            const allPaths = entries.map((e) => e.path);
+            const allPaths = entries.map((entry) => entry.path);
             selectMultiple(allPaths, false);
           }
           break;
@@ -264,7 +403,7 @@ export function FileListView({ entries }: FileListViewProps) {
 
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [entries, focusedPath, select, selectRange, selectMultiple, navigateTo, virtualizer]);
+  }, [entries, focusedPath, select, selectRange, selectMultiple, navigateTo, virtualizer, editingPath, isCreatingHere, selectedPaths, startEditing, stopEditing, stopCreating, currentPath, handleMoveToTrash]);
 
   const selectionRect = getSelectionRect();
 
@@ -273,6 +412,7 @@ export function FileListView({ entries }: FileListViewProps) {
       ref={parentRef}
       onClick={handleContainerClick}
       onMouseDown={handleContainerMouseDown}
+      onContextMenu={handleBackgroundContextMenu}
       className="relative h-full overflow-auto focus:outline-none select-none"
       tabIndex={0}
     >
@@ -294,13 +434,39 @@ export function FileListView({ entries }: FileListViewProps) {
         }}
       >
         {virtualizer.getVirtualItems().map((virtualRow) => {
-          const entry = entries[virtualRow.index];
+          // If creating and this is the first row, show the new item row
+          if (isCreatingHere && virtualRow.index === 0) {
+            return (
+              <NewItemRow
+                key="__new_item__"
+                type={creatingType!}
+                style={{
+                  position: 'absolute',
+                  top: 0,
+                  left: 0,
+                  width: '100%',
+                  height: `${virtualRow.size}px`,
+                  transform: `translateY(${virtualRow.start}px)`,
+                }}
+                onConfirm={handleCreateConfirm}
+                onCancel={handleCreateCancel}
+              />
+            );
+          }
+
+          // Adjust index if we have a new item row
+          const entryIndex = isCreatingHere ? virtualRow.index - 1 : virtualRow.index;
+          const entry = entries[entryIndex];
+
+          if (!entry) return null;
+
           return (
             <FileRow
               key={entry.path}
               entry={entry}
               isSelected={selectedPaths.has(entry.path)}
               isFocused={focusedPath === entry.path}
+              isEditing={editingPath === entry.path}
               style={{
                 position: 'absolute',
                 top: 0,
@@ -312,6 +478,8 @@ export function FileListView({ entries }: FileListViewProps) {
               onClick={(e) => handleClick(entry, e)}
               onDoubleClick={() => handleDoubleClick(entry)}
               onContextMenu={(e) => handleContextMenu(entry, e)}
+              onRenameConfirm={(newName) => handleRenameConfirm(entry.path, newName)}
+              onRenameCancel={handleRenameCancel}
             />
           );
         })}
@@ -334,7 +502,7 @@ export function FileListView({ entries }: FileListViewProps) {
         />
       )}
 
-      {/* Context Menu */}
+      {/* Context Menu (for files/folders) */}
       {contextMenu && (
         <ContextMenu
           position={contextMenu.position}
@@ -345,13 +513,18 @@ export function FileListView({ entries }: FileListViewProps) {
               isDirectory: contextMenu.entry.isDirectory,
             },
             {
-              onOpen: () => {
+              onOpen: async () => {
                 if (contextMenu.entry.isDirectory) {
                   navigateTo(contextMenu.entry.path);
+                } else {
+                  await openFile(contextMenu.entry.path);
                 }
               },
               onOrganizeWithAI: () => {
                 startOrganize(contextMenu.entry.path);
+              },
+              onRename: () => {
+                startEditing(contextMenu.entry.path);
               },
               onMoveToTrash: () => {
                 handleMoveToTrash(contextMenu.entry.path);
@@ -359,6 +532,22 @@ export function FileListView({ entries }: FileListViewProps) {
             }
           )}
           onClose={() => setContextMenu(null)}
+        />
+      )}
+
+      {/* Background Context Menu (for empty space) */}
+      {backgroundContextMenu && (
+        <ContextMenu
+          position={backgroundContextMenu}
+          items={buildBackgroundContextMenuItems({
+            onNewFolder: () => {
+              startCreating('folder', currentPath);
+            },
+            onNewFile: () => {
+              startCreating('file', currentPath);
+            },
+          })}
+          onClose={() => setBackgroundContextMenu(null)}
         />
       )}
     </div>

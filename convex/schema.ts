@@ -20,7 +20,8 @@ export default defineSchema({
     theme: v.union(v.literal("light"), v.literal("dark"), v.literal("system")),
     // Auto-rename sentinel
     autoRenameEnabled: v.boolean(),
-    watchedFolders: v.array(v.string()), // Paths to watch for auto-rename
+    watchDownloads: v.optional(v.boolean()), // Whether to watch Downloads folder for auto-rename (optional for migration)
+    watchedFolders: v.array(v.string()), // Additional paths to watch for auto-rename
     // File browser preferences
     showHiddenFiles: v.boolean(),
     defaultView: v.union(

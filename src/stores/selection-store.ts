@@ -8,6 +8,12 @@ interface SelectionState {
   focusedPath: string | null;
   /** Last selected path (for shift-click range selection) */
   lastSelectedPath: string | null;
+  /** Path currently being renamed (inline editing) */
+  editingPath: string | null;
+  /** Type of item being created ('file' | 'folder' | null) */
+  creatingType: 'file' | 'folder' | null;
+  /** Directory where new item is being created */
+  creatingInPath: string | null;
 }
 
 interface SelectionActions {
@@ -29,12 +35,23 @@ interface SelectionActions {
   isSelected: (path: string) => boolean;
   /** Get selected entries from a list */
   getSelectedEntries: (entries: FileEntry[]) => FileEntry[];
+  /** Start inline editing (renaming) for a path */
+  startEditing: (path: string) => void;
+  /** Stop inline editing */
+  stopEditing: () => void;
+  /** Start creating a new file or folder */
+  startCreating: (type: 'file' | 'folder', inPath: string) => void;
+  /** Stop creating (cancel or complete) */
+  stopCreating: () => void;
 }
 
 export const useSelectionStore = create<SelectionState & SelectionActions>((set, get) => ({
   selectedPaths: new Set<string>(),
   focusedPath: null,
   lastSelectedPath: null,
+  editingPath: null,
+  creatingType: null,
+  creatingInPath: null,
 
   select: (path: string, additive = false) => {
     set((state) => {
@@ -152,5 +169,33 @@ export const useSelectionStore = create<SelectionState & SelectionActions>((set,
   getSelectedEntries: (entries: FileEntry[]) => {
     const { selectedPaths } = get();
     return entries.filter((e) => selectedPaths.has(e.path));
+  },
+
+  startEditing: (path: string) => {
+    set({
+      editingPath: path,
+      creatingType: null,
+      creatingInPath: null,
+    });
+  },
+
+  stopEditing: () => {
+    set({ editingPath: null });
+  },
+
+  startCreating: (type: 'file' | 'folder', inPath: string) => {
+    set({
+      creatingType: type,
+      creatingInPath: inPath,
+      editingPath: null,
+      selectedPaths: new Set(),
+    });
+  },
+
+  stopCreating: () => {
+    set({
+      creatingType: null,
+      creatingInPath: null,
+    });
   },
 }));

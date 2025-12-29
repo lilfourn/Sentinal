@@ -73,3 +73,6 @@ image = "0.25"
 base64 = "0.22"
 sha2 = "0.10"
 
+# SVG rendering
+resvg = "0.44"
+

@@ -290,6 +290,45 @@ impl AnthropicClient {
         .await
     }
 
+    /// Suggest naming conventions for a folder using Claude Haiku (fast)
+    pub async fn suggest_naming_conventions(
+        &self,
+        folder_path: &str,
+        file_listing: &str,
+    ) -> Result<super::naming::NamingConventionSuggestions, String> {
+        let user_prompt = super::prompts::build_naming_convention_prompt(folder_path, file_listing);
+
+        eprintln!("[AI] Suggesting naming conventions for: {}", folder_path);
+
+        let response = self
+            .send_message(
+                ClaudeModel::Haiku,
+                super::prompts::NAMING_CONVENTION_SYSTEM_PROMPT,
+                &user_prompt,
+                1024,
+            )
+            .await?;
+
+        eprintln!("[AI] Naming conventions response length: {} chars", response.len());
+
+        // Parse the JSON response
+        #[derive(serde::Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct RawResponse {
+            total_files_analyzed: u32,
+            suggestions: Vec<super::naming::NamingConvention>,
+        }
+
+        let raw: RawResponse = super::json_parser::extract_json(&response)
+            .map_err(|e| format!("Failed to parse naming conventions: {}", e))?;
+
+        Ok(super::naming::NamingConventionSuggestions {
+            folder_path: folder_path.to_string(),
+            total_files_analyzed: raw.total_files_analyzed,
+            suggestions: raw.suggestions,
+        })
+    }
+
     /// Generate organization plan using Claude Sonnet
     pub async fn generate_organize_plan(
         &self,
@@ -384,7 +423,7 @@ impl AnthropicClient {
         let system_prompt = super::prompts::AGENTIC_ORGANIZE_SYSTEM_PROMPT;
 
         let initial_message = format!(
-            "Target folder: {}\nUser request: {}\n\nExplore the folder structure and generate an organization plan.",
+            "Target folder: {}\nUser request: {}\n\nExplore the folder and then call submit_plan with your organization plan.",
             target_folder, user_request
         );
 
@@ -395,10 +434,9 @@ impl AnthropicClient {
 
         let allowed_path = Path::new(target_folder);
 
-        // Agentic loop - max 10 iterations to prevent infinite loops
-        for iteration in 0..10 {
+        // Agentic loop - max 15 iterations as safety net
+        for iteration in 0..15 {
             eprintln!("[AgenticLoop] Iteration {}", iteration + 1);
-            event_emitter("thinking", &format!("Processing... (step {})", iteration + 1));
 
             let response = self
                 .send_with_tools(
@@ -412,40 +450,66 @@ impl AnthropicClient {
 
             eprintln!("[AgenticLoop] stop_reason: {}", response.stop_reason);
 
-            // Check stop reason
-            if response.stop_reason == "end_turn" {
-                // Extract final JSON from text content
-                let text = Self::extract_text_content(&response.content);
-                eprintln!("[AgenticLoop] Final response length: {} chars", text.len());
-
-                return Self::parse_organize_plan(&text, target_folder);
-            }
-
-            // Handle tool uses
+            // Handle tool uses - check for submit_plan first
             let mut tool_results: Vec<ToolResult> = Vec::new();
             let mut assistant_content: Vec<ToolMessageContent> = Vec::new();
 
             for block in &response.content {
                 match block {
                     ContentBlockResponse::Text { text } => {
-                        eprintln!("[AgenticLoop] Thinking: {}...", &text.chars().take(100).collect::<String>());
-                        event_emitter("thinking", text);
+                        if !text.trim().is_empty() {
+                            eprintln!("[AgenticLoop] Thinking: {}...", &text.chars().take(100).collect::<String>());
+                            // Emit thinking as a step so user sees agent's reasoning
+                            let preview: String = text.chars().take(200).collect();
+                            if preview.len() > 20 {
+                                event_emitter("thinking", &preview);
+                            }
+                        }
                         assistant_content.push(ToolMessageContent::text(text));
                     }
                     ContentBlockResponse::ToolUse { id, name, input } => {
-                        eprintln!("[AgenticLoop] Tool use: {} with {:?}", name, input);
-                        event_emitter("executing", &format!("Running {}", name));
+                        eprintln!("[AgenticLoop] Tool use: {}", name);
                         assistant_content.push(ToolMessageContent::tool_use(id, name, input));
+
+                        // Check if this is the submit_plan tool - if so, extract and return
+                        if name == "submit_plan" {
+                            let op_count = input.get("operations")
+                                .and_then(|v| v.as_array())
+                                .map(|a| a.len())
+                                .unwrap_or(0);
+                            event_emitter("planning", &format!("Created plan with {} operations", op_count));
+                            return Self::parse_plan_from_tool_input(input, target_folder);
+                        }
+
+                        // Execute other tools with descriptive messages
+                        let tool_desc = match name.as_str() {
+                            "run_shell_command" => {
+                                let cmd = input.get("command")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("command");
+                                // Extract just the command name
+                                let cmd_name = cmd.split_whitespace().next().unwrap_or("shell");
+                                format!("Running {} to explore files", cmd_name)
+                            }
+                            _ => format!("Executing {}", name)
+                        };
+                        event_emitter("executing", &tool_desc);
 
                         let result = super::tool_executor::execute_tool(name, input, allowed_path);
 
                         let tool_result = match result {
                             Ok(output) => {
                                 eprintln!("[AgenticLoop] Tool success: {} bytes", output.len());
+                                // Emit result summary
+                                let lines = output.lines().count();
+                                if lines > 0 {
+                                    event_emitter("analyzing", &format!("Found {} items", lines));
+                                }
                                 ToolResult::success(id.clone(), output)
                             }
                             Err(e) => {
                                 eprintln!("[AgenticLoop] Tool error: {}", e);
+                                event_emitter("error", &format!("Tool error: {}", e));
                                 ToolResult::error(id.clone(), e)
                             }
                         };
@@ -455,23 +519,85 @@ impl AnthropicClient {
                 }
             }
 
+            // If stop_reason is end_turn and no submit_plan was called, try to parse from text
+            if response.stop_reason == "end_turn" {
+                let text = Self::extract_text_content(&response.content);
+                if !text.trim().is_empty() {
+                    eprintln!("[AgenticLoop] Attempting to parse JSON from end_turn response");
+                    if let Ok(plan) = Self::parse_organize_plan(&text, target_folder) {
+                        return Ok(plan);
+                    }
+                }
+                // If we can't parse, return an error - agent should have called submit_plan
+                return Err("Agent finished without submitting a plan. Please try again.".to_string());
+            }
+
             // Add assistant message with tool uses
             messages.push(ToolMessage {
                 role: "assistant".to_string(),
                 content: assistant_content,
             });
 
-            // Add tool results as user message
-            messages.push(ToolMessage {
-                role: "user".to_string(),
-                content: tool_results
-                    .into_iter()
-                    .map(ToolMessageContent::tool_result)
-                    .collect(),
-            });
+            // Add tool results as user message (if any - submit_plan returns early)
+            if !tool_results.is_empty() {
+                messages.push(ToolMessage {
+                    role: "user".to_string(),
+                    content: tool_results
+                        .into_iter()
+                        .map(ToolMessageContent::tool_result)
+                        .collect(),
+                });
+            }
         }
 
-        Err("Agentic loop exceeded maximum iterations".to_string())
+        Err("Organization took too long. Please try with a smaller folder.".to_string())
+    }
+
+    /// Parse plan directly from submit_plan tool input
+    fn parse_plan_from_tool_input(
+        input: &serde_json::Value,
+        target_folder: &str,
+    ) -> Result<OrganizePlan, String> {
+        use crate::jobs::OrganizeOperation;
+
+        let description = input
+            .get("description")
+            .and_then(|v| v.as_str())
+            .unwrap_or("Organization plan")
+            .to_string();
+
+        let operations_json = input
+            .get("operations")
+            .and_then(|v| v.as_array())
+            .ok_or("Missing operations array in submit_plan")?;
+
+        let operations: Vec<OrganizeOperation> = operations_json
+            .iter()
+            .enumerate()
+            .map(|(i, op)| OrganizeOperation {
+                op_id: format!("op-{}", i + 1),
+                op_type: op.get("type").and_then(|v| v.as_str()).unwrap_or("unknown").to_string(),
+                source: op.get("source").and_then(|v| v.as_str()).map(String::from),
+                destination: op.get("destination").and_then(|v| v.as_str()).map(String::from),
+                path: op.get("path").and_then(|v| v.as_str()).map(String::from),
+                new_name: op.get("newName").and_then(|v| v.as_str()).map(String::from),
+            })
+            .collect();
+
+        eprintln!("[AgenticLoop] Building plan - description: {:?}", description);
+        eprintln!("[AgenticLoop] Building plan - operations count: {}", operations.len());
+
+        let plan = OrganizePlan {
+            plan_id: format!("plan-{}", chrono::Utc::now().timestamp_millis()),
+            description,
+            operations,
+            target_folder: target_folder.to_string(),
+        };
+
+        // Log the serialized plan to verify structure matches frontend expectations
+        eprintln!("[AgenticLoop] Serialized plan: {}", serde_json::to_string(&plan).unwrap_or_else(|e| format!("serialization error: {}", e)));
+
+        Ok(plan)
     }
 
     /// Extract text from response content blocks

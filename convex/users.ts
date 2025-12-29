@@ -48,6 +48,7 @@ export const getOrCreateUser = mutation({
       userId,
       theme: "system",
       autoRenameEnabled: false,
+      watchDownloads: false,
       watchedFolders: [],
       showHiddenFiles: false,
       defaultView: "list",

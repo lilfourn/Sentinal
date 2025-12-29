@@ -35,6 +35,7 @@ export const updateSettings = mutation({
   args: {
     theme: v.optional(v.union(v.literal("light"), v.literal("dark"), v.literal("system"))),
     autoRenameEnabled: v.optional(v.boolean()),
+    watchDownloads: v.optional(v.boolean()),
     watchedFolders: v.optional(v.array(v.string())),
     showHiddenFiles: v.optional(v.boolean()),
     defaultView: v.optional(
@@ -74,6 +75,7 @@ export const updateSettings = mutation({
     const updates: Record<string, unknown> = {};
     if (args.theme !== undefined) updates.theme = args.theme;
     if (args.autoRenameEnabled !== undefined) updates.autoRenameEnabled = args.autoRenameEnabled;
+    if (args.watchDownloads !== undefined) updates.watchDownloads = args.watchDownloads;
     if (args.watchedFolders !== undefined) updates.watchedFolders = args.watchedFolders;
     if (args.showHiddenFiles !== undefined) updates.showHiddenFiles = args.showHiddenFiles;
     if (args.defaultView !== undefined) updates.defaultView = args.defaultView;
@@ -194,6 +196,43 @@ export const toggleAutoRename = mutation({
 
     await ctx.db.patch(settings._id, {
       autoRenameEnabled: args.enabled,
+    });
+
+    return settings._id;
+  },
+});
+
+/**
+ * Toggle watch Downloads folder feature
+ */
+export const toggleWatchDownloads = mutation({
+  args: { enabled: v.boolean() },
+  handler: async (ctx, args) => {
+    const identity = await ctx.auth.getUserIdentity();
+    if (!identity) {
+      throw new Error("Not authenticated");
+    }
+
+    const user = await ctx.db
+      .query("users")
+      .withIndex("by_token", (q) => q.eq("tokenIdentifier", identity.tokenIdentifier))
+      .unique();
+
+    if (!user) {
+      throw new Error("User not found");
+    }
+
+    const settings = await ctx.db
+      .query("userSettings")
+      .withIndex("by_user", (q) => q.eq("userId", user._id))
+      .unique();
+
+    if (!settings) {
+      throw new Error("Settings not found");
+    }
+
+    await ctx.db.patch(settings._id, {
+      watchDownloads: args.enabled,
     });
 
     return settings._id;

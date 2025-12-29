@@ -1,4 +1,4 @@
-import { useCallback } from "react";
+import { useCallback, useEffect, useRef } from "react";
 import {
   useSettingsStore,
   type Theme,
@@ -8,32 +8,30 @@ import {
   type AIModel,
 } from "../stores/settings-store";
 
+// Check if Convex/Clerk are configured at module level
+const isConvexConfigured = Boolean(import.meta.env.VITE_CONVEX_URL);
+const isClerkConfigured = Boolean(import.meta.env.VITE_CLERK_PUBLISHABLE_KEY);
+
 /**
  * Hook that provides settings with Convex sync capability
  *
- * Currently uses local-only storage. When Convex is configured,
- * this hook will sync settings bidirectionally.
- *
- * To enable Convex sync:
- * 1. Run `npx convex dev` to initialize Convex
- * 2. Set VITE_CONVEX_URL in .env.local
- * 3. Set VITE_CLERK_PUBLISHABLE_KEY for authentication
+ * When authenticated with Clerk and Convex is configured:
+ * - Settings are loaded from Convex on mount
+ * - Local changes are synced to Convex automatically
+ * - Settings persist across devices
  */
 export function useSyncedSettings() {
   const store = useSettingsStore();
 
-  // Check if Convex is configured
-  const isConvexConfigured = Boolean(import.meta.env.VITE_CONVEX_URL);
-  const isClerkConfigured = Boolean(import.meta.env.VITE_CLERK_PUBLISHABLE_KEY);
-
   /**
-   * Update settings (local-first with optional cloud sync)
+   * Update settings (local-first with cloud sync)
    */
   const updateSettings = useCallback(
     async (
       updates: Partial<{
         theme: Theme;
         autoRenameEnabled: boolean;
+        watchDownloads: boolean;
         showHiddenFiles: boolean;
         defaultView: ViewMode;
         sortBy: SortBy;
@@ -45,6 +43,8 @@ export function useSyncedSettings() {
       if (updates.theme !== undefined) store.setTheme(updates.theme);
       if (updates.autoRenameEnabled !== undefined)
         store.setAutoRename(updates.autoRenameEnabled);
+      if (updates.watchDownloads !== undefined)
+        store.setWatchDownloads(updates.watchDownloads);
       if (updates.showHiddenFiles !== undefined)
         store.setShowHiddenFiles(updates.showHiddenFiles);
       if (updates.defaultView !== undefined)
@@ -54,8 +54,31 @@ export function useSyncedSettings() {
         store.setSortDirection(updates.sortDirection);
       if (updates.aiModel !== undefined) store.setAIModel(updates.aiModel);
 
-      // TODO: When Convex is configured, sync to cloud here
-      // This will be implemented after running `npx convex dev`
+      // Sync to Convex if configured
+      if (isConvexConfigured && isClerkConfigured) {
+        try {
+          store.setSyncing(true);
+          const { ConvexHttpClient } = await import("convex/browser");
+          const { api } = await import("../../convex/_generated/api");
+
+          // Use HTTP client for mutations (doesn't require hooks context)
+          const client = new ConvexHttpClient(import.meta.env.VITE_CONVEX_URL);
+
+          // Get auth token from Clerk (window.Clerk is set by ClerkProvider)
+          const clerkWindow = window as unknown as { Clerk?: { session?: { getToken: (opts: { template: string }) => Promise<string | null> } } };
+          if (clerkWindow.Clerk?.session) {
+            const token = await clerkWindow.Clerk.session.getToken({ template: "convex" });
+            if (token) {
+              client.setAuth(token);
+              await client.mutation(api.settings.updateSettings, updates);
+            }
+          }
+        } catch (error) {
+          console.error("Failed to sync settings to Convex:", error);
+        } finally {
+          store.setSyncing(false);
+        }
+      }
     },
     [store]
   );
@@ -63,8 +86,61 @@ export function useSyncedSettings() {
   return {
     ...store,
     updateSettings,
-    isAuthenticated: false, // Will be true when Clerk is configured
+    isAuthenticated: false, // Will be updated by Clerk in the component
     isConvexAvailable: isConvexConfigured,
     isClerkAvailable: isClerkConfigured,
   };
+}
+
+/**
+ * Hook to sync settings from Convex on initial load
+ * This should be called from a component that's inside ClerkProvider
+ */
+export function useConvexSettingsSync() {
+  const store = useSettingsStore();
+  const hasSynced = useRef(false);
+
+  useEffect(() => {
+    if (!isConvexConfigured || !isClerkConfigured || hasSynced.current) return;
+
+    const syncFromConvex = async () => {
+      try {
+        const { ConvexHttpClient } = await import("convex/browser");
+        const { api } = await import("../../convex/_generated/api");
+
+        const client = new ConvexHttpClient(import.meta.env.VITE_CONVEX_URL);
+
+        // Get auth token from Clerk
+        const clerk = (window as unknown as { Clerk?: { session?: { getToken: (opts: { template: string }) => Promise<string | null> } } }).Clerk;
+        if (clerk?.session) {
+          const token = await clerk.session.getToken({ template: "convex" });
+          if (token) {
+            client.setAuth(token);
+            const settings = await client.query(api.settings.getSettings);
+
+            if (settings) {
+              hasSynced.current = true;
+              store.syncFromConvex({
+                theme: settings.theme as Theme,
+                autoRenameEnabled: settings.autoRenameEnabled,
+                watchDownloads: settings.watchDownloads ?? false, // Default to false if undefined
+                watchedFolders: settings.watchedFolders,
+                showHiddenFiles: settings.showHiddenFiles,
+                defaultView: settings.defaultView as ViewMode,
+                sortBy: settings.sortBy as SortBy,
+                sortDirection: settings.sortDirection as SortDirection,
+                aiModel: settings.aiModel as AIModel,
+              });
+            }
+          }
+        }
+      } catch (error) {
+        console.error("Failed to sync settings from Convex:", error);
+      }
+    };
+
+    // Wait a bit for Clerk to initialize
+    const timer = setTimeout(syncFromConvex, 1000);
+    return () => clearTimeout(timer);
+  }, [store]);
 }

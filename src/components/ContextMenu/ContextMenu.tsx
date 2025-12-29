@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState, useLayoutEffect } from 'react';
+import { createPortal } from 'react-dom';
 import {
   Sparkles,
   Copy,
@@ -7,6 +8,8 @@ import {
   Edit3,
   FileText,
   ExternalLink,
+  FolderPlus,
+  FilePlus,
 } from 'lucide-react';
 import { cn } from '../../lib/utils';
 
@@ -34,7 +37,11 @@ interface ContextMenuProps {
 
 export function ContextMenu({ position, items, onClose }: ContextMenuProps) {
   const menuRef = useRef<HTMLDivElement>(null);
-  const [adjustedPos, setAdjustedPos] = useState<ContextMenuPosition | null>(null);
+  // Store both the original position and calculated adjustment together
+  const [adjustment, setAdjustment] = useState<{
+    forPosition: ContextMenuPosition;
+    adjustedPosition: ContextMenuPosition;
+  } | null>(null);
 
   // Close on click outside
   useEffect(() => {
@@ -64,53 +71,55 @@ export function ContextMenu({ position, items, onClose }: ContextMenuProps) {
   // Calculate adjusted position after menu renders
   useLayoutEffect(() => {
     if (!position || !menuRef.current) {
-      setAdjustedPos(null);
       return;
     }
 
     const menu = menuRef.current;
     const rect = menu.getBoundingClientRect();
 
-    // Use document.documentElement for more reliable viewport dimensions
-    const viewportWidth = document.documentElement.clientWidth;
-    const viewportHeight = document.documentElement.clientHeight;
-
-    const padding = 8; // Minimum padding from edges
+    const viewportWidth = window.innerWidth;
+    const viewportHeight = window.innerHeight;
+    const padding = 8;
 
     let x = position.x;
     let y = position.y;
 
-    // Adjust if menu extends beyond right edge
+    // Flip left if would overflow right
     if (x + rect.width > viewportWidth - padding) {
-      x = Math.max(padding, viewportWidth - rect.width - padding);
+      x = Math.max(padding, position.x - rect.width);
     }
 
-    // Adjust if menu extends beyond bottom edge
+    // Flip up if would overflow bottom
     if (y + rect.height > viewportHeight - padding) {
-      y = Math.max(padding, viewportHeight - rect.height - padding);
+      y = Math.max(padding, position.y - rect.height);
     }
 
-    // Ensure minimum padding from left/top edges
-    x = Math.max(padding, x);
-    y = Math.max(padding, y);
-
-    setAdjustedPos({ x, y });
+    setAdjustment({
+      forPosition: position,
+      adjustedPosition: { x, y },
+    });
   }, [position]);
 
   if (!position) return null;
 
-  // Use adjusted position if calculated, otherwise use original (will be corrected after render)
-  const finalPos = adjustedPos || position;
+  // Check if the adjustment was calculated for the current position
+  const isAdjustedForCurrentPosition = adjustment &&
+    adjustment.forPosition.x === position.x &&
+    adjustment.forPosition.y === position.y;
 
-  return (
+  const finalPos = isAdjustedForCurrentPosition ? adjustment.adjustedPosition : position;
+  const isReady = isAdjustedForCurrentPosition;
+
+  // Use portal to render at document body level, bypassing any parent
+  // backdrop-filter which creates a new containing block for fixed positioning
+  return createPortal(
     <div
       ref={menuRef}
       className={cn(
-        'fixed z-[100] min-w-[180px] py-1',
-        'bg-white dark:bg-gray-800 rounded-lg shadow-xl',
-        'border border-gray-200 dark:border-gray-700',
-        // Only show animation after position is calculated to prevent flicker
-        adjustedPos ? 'animate-in fade-in-0 zoom-in-95 duration-100' : 'opacity-0'
+        'fixed z-[100] min-w-[180px] py-1 whitespace-nowrap rounded-lg',
+        'glass-context-menu',
+        // Use invisible during measurement phase to prevent flicker
+        isReady ? 'animate-in fade-in-0 zoom-in-95 duration-100' : 'invisible'
       )}
       style={{
         left: finalPos.x,
@@ -122,7 +131,7 @@ export function ContextMenu({ position, items, onClose }: ContextMenuProps) {
           return (
             <div
               key={`sep-${index}`}
-              className="h-px my-1 bg-gray-200 dark:bg-gray-700"
+              className="h-px my-1 mx-2 bg-black/10 dark:bg-white/10"
             />
           );
         }
@@ -139,10 +148,11 @@ export function ContextMenu({ position, items, onClose }: ContextMenuProps) {
             disabled={item.disabled}
             className={cn(
               'w-full flex items-center gap-3 px-3 py-1.5 text-sm text-left',
+              'text-gray-800 dark:text-gray-200',
               'transition-colors',
               item.disabled && 'opacity-50 cursor-not-allowed',
-              !item.disabled && !item.danger && 'hover:bg-gray-100 dark:hover:bg-gray-700',
-              !item.disabled && item.danger && 'hover:bg-red-100 dark:hover:bg-red-900/30 text-red-600 dark:text-red-400'
+              !item.disabled && !item.danger && 'hover:bg-[color:var(--color-accent)]/15',
+              !item.disabled && item.danger && 'hover:bg-red-500/15 text-red-600 dark:text-red-400'
             )}
           >
             {item.icon && (
@@ -159,8 +169,34 @@ export function ContextMenu({ position, items, onClose }: ContextMenuProps) {
           </button>
         );
       })}
-    </div>
+    </div>,
+    document.body
   );
+}
+
+// Helper to build context menu items for background (empty space) clicks
+export function buildBackgroundContextMenuItems(
+  handlers: {
+    onNewFolder?: () => void;
+    onNewFile?: () => void;
+  }
+): ContextMenuItem[] {
+  return [
+    {
+      id: 'new-folder',
+      label: 'New Folder',
+      icon: <FolderPlus size={14} />,
+      shortcut: '⇧⌘N',
+      onClick: handlers.onNewFolder,
+    },
+    {
+      id: 'new-file',
+      label: 'New File',
+      icon: <FilePlus size={14} />,
+      shortcut: '⌘N',
+      onClick: handlers.onNewFile,
+    },
+  ];
 }
 
 // Helper to build context menu items for files/folders

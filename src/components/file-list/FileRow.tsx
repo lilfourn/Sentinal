@@ -11,16 +11,20 @@ import {
 } from 'lucide-react';
 import { cn, formatFileSize, formatDate, getFileType } from '../../lib/utils';
 import { FolderIcon } from '../icons/FolderIcon';
+import { InlineNameEditor } from './InlineNameEditor';
 import type { FileEntry } from '../../types/file';
 
 interface FileRowProps {
   entry: FileEntry;
   isSelected: boolean;
   isFocused: boolean;
+  isEditing?: boolean;
   style?: React.CSSProperties;
   onClick: (e: React.MouseEvent) => void;
   onDoubleClick: () => void;
   onContextMenu?: (e: React.MouseEvent) => void;
+  onRenameConfirm?: (newName: string) => void;
+  onRenameCancel?: () => void;
 }
 
 const fileTypeIcons: Record<string, LucideIcon> = {
@@ -45,25 +49,28 @@ export function FileRow({
   entry,
   isSelected,
   isFocused,
+  isEditing = false,
   style,
   onClick,
   onDoubleClick,
   onContextMenu,
+  onRenameConfirm,
+  onRenameCancel,
 }: FileRowProps) {
   const Icon = getFileIcon(entry);
 
   return (
     <div
       style={style}
-      onClick={onClick}
-      onDoubleClick={onDoubleClick}
-      onContextMenu={onContextMenu}
+      onClick={isEditing ? undefined : onClick}
+      onDoubleClick={isEditing ? undefined : onDoubleClick}
+      onContextMenu={isEditing ? undefined : onContextMenu}
       className={cn(
         'flex items-center gap-3 px-4 cursor-default select-none',
         'transition-colors duration-75',
         isSelected && isFocused && 'bg-[color:var(--color-file-selected-focused)]',
         isSelected && !isFocused && 'bg-[color:var(--color-file-selected)]',
-        !isSelected && 'hover:bg-[color:var(--color-file-hover)]'
+        !isSelected && !isEditing && 'hover:bg-[color:var(--color-file-hover)]'
       )}
     >
       {/* Icon */}
@@ -73,15 +80,25 @@ export function FileRow({
         Icon && <Icon size={18} className="text-gray-400 dark:text-gray-500" />
       )}
 
-      {/* Name */}
-      <span
-        className={cn(
-          'flex-1 truncate text-sm text-gray-800 dark:text-gray-200',
-          entry.isHidden && 'text-gray-400 dark:text-gray-500'
-        )}
-      >
-        {entry.name}
-      </span>
+      {/* Name - either editable or static */}
+      {isEditing && onRenameConfirm && onRenameCancel ? (
+        <InlineNameEditor
+          initialValue={entry.name}
+          onConfirm={onRenameConfirm}
+          onCancel={onRenameCancel}
+          selectNameOnly={!entry.isDirectory}
+          className="flex-1"
+        />
+      ) : (
+        <span
+          className={cn(
+            'flex-1 truncate text-sm text-gray-800 dark:text-gray-200',
+            entry.isHidden && 'text-gray-400 dark:text-gray-500'
+          )}
+        >
+          {entry.name}
+        </span>
+      )}
 
       {/* Modified date */}
       <span className="w-36 text-xs text-gray-500 dark:text-gray-500 truncate">

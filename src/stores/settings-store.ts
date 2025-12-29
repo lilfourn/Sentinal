@@ -13,6 +13,7 @@ interface SettingsState {
 
   // Auto-rename sentinel
   autoRenameEnabled: boolean;
+  watchDownloads: boolean; // Whether to watch Downloads folder for auto-rename
   watchedFolders: string[];
 
   // File browser preferences
@@ -24,6 +25,9 @@ interface SettingsState {
   // AI preferences
   aiModel: AIModel;
 
+  // Navigation
+  lastVisitedPath: string | null;
+
   // Sync state
   lastSyncedAt: number | null;
   isSyncing: boolean;
@@ -31,6 +35,7 @@ interface SettingsState {
   // Actions
   setTheme: (theme: Theme) => void;
   setAutoRename: (enabled: boolean) => void;
+  setWatchDownloads: (enabled: boolean) => void;
   addWatchedFolder: (folder: string) => void;
   removeWatchedFolder: (folder: string) => void;
   setShowHiddenFiles: (show: boolean) => void;
@@ -38,6 +43,7 @@ interface SettingsState {
   setSortBy: (sortBy: SortBy) => void;
   setSortDirection: (direction: SortDirection) => void;
   setAIModel: (model: AIModel) => void;
+  setLastVisitedPath: (path: string) => void;
 
   // Sync with Convex
   syncFromConvex: (settings: Partial<SettingsState>) => void;
@@ -56,12 +62,14 @@ export const useSettingsStore = create<SettingsState>()(
       // Default values
       theme: "system",
       autoRenameEnabled: false,
+      watchDownloads: false,
       watchedFolders: [],
       showHiddenFiles: false,
       defaultView: "list",
       sortBy: "name",
       sortDirection: "asc",
       aiModel: "sonnet",
+      lastVisitedPath: null,
       lastSyncedAt: null,
       isSyncing: false,
 
@@ -69,6 +77,8 @@ export const useSettingsStore = create<SettingsState>()(
       setTheme: (theme) => set({ theme }),
 
       setAutoRename: (enabled) => set({ autoRenameEnabled: enabled }),
+
+      setWatchDownloads: (enabled) => set({ watchDownloads: enabled }),
 
       addWatchedFolder: (folder) =>
         set((state) => ({
@@ -92,6 +102,8 @@ export const useSettingsStore = create<SettingsState>()(
 
       setAIModel: (model) => set({ aiModel: model }),
 
+      setLastVisitedPath: (path) => set({ lastVisitedPath: path }),
+
       // Sync methods
       syncFromConvex: (settings) =>
         set((state) => ({
@@ -108,12 +120,14 @@ export const useSettingsStore = create<SettingsState>()(
       partialize: (state) => ({
         theme: state.theme,
         autoRenameEnabled: state.autoRenameEnabled,
+        watchDownloads: state.watchDownloads,
         watchedFolders: state.watchedFolders,
         showHiddenFiles: state.showHiddenFiles,
         defaultView: state.defaultView,
         sortBy: state.sortBy,
         sortDirection: state.sortDirection,
         aiModel: state.aiModel,
+        lastVisitedPath: state.lastVisitedPath,
         lastSyncedAt: state.lastSyncedAt,
       }),
     }

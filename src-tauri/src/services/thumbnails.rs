@@ -1,5 +1,7 @@
 use base64::{engine::general_purpose::STANDARD, Engine};
-use image::{imageops::FilterType, ImageFormat};
+use image::{imageops::FilterType, ImageFormat, RgbaImage};
+use resvg::tiny_skia::Pixmap;
+use resvg::usvg::{Options, Tree};
 use sha2::{Digest, Sha256};
 use std::fs;
 use std::io::Cursor;
@@ -143,6 +145,49 @@ fn generate_pdf_thumbnail(path: &Path, size: u32) -> Result<Vec<u8>, String> {
     generate_video_thumbnail(path, size)
 }
 
+/// Generate thumbnail for an SVG file using resvg
+fn generate_svg_thumbnail(path: &Path, size: u32) -> Result<Vec<u8>, String> {
+    // Read SVG content
+    let svg_data = fs::read(path).map_err(|e| format!("Failed to read SVG: {}", e))?;
+
+    // Parse SVG
+    let options = Options::default();
+    let tree =
+        Tree::from_data(&svg_data, &options).map_err(|e| format!("Failed to parse SVG: {}", e))?;
+
+    // Get original size
+    let svg_size = tree.size();
+    let (orig_width, orig_height) = (svg_size.width(), svg_size.height());
+
+    // Calculate scaled size maintaining aspect ratio
+    let scale = if orig_width > orig_height {
+        size as f32 / orig_width
+    } else {
+        size as f32 / orig_height
+    };
+
+    let width = (orig_width * scale).ceil() as u32;
+    let height = (orig_height * scale).ceil() as u32;
+
+    // Create pixmap for rendering
+    let mut pixmap = Pixmap::new(width, height).ok_or("Failed to create pixmap")?;
+
+    // Render SVG
+    let transform = resvg::tiny_skia::Transform::from_scale(scale, scale);
+    resvg::render(&tree, transform, &mut pixmap.as_mut());
+
+    // Convert to image crate format for consistent output
+    let img = RgbaImage::from_raw(width, height, pixmap.data().to_vec())
+        .ok_or("Failed to create image from pixmap")?;
+
+    // Encode as PNG
+    let mut buffer = Cursor::new(Vec::new());
+    img.write_to(&mut buffer, ImageFormat::Png)
+        .map_err(|e| format!("Failed to encode SVG thumbnail: {}", e))?;
+
+    Ok(buffer.into_inner())
+}
+
 /// Main function to generate or retrieve a thumbnail
 pub fn get_thumbnail(file_path: &str, size: Option<u32>) -> Result<String, String> {
     let size = size.unwrap_or(DEFAULT_THUMBNAIL_SIZE);
@@ -171,6 +216,8 @@ pub fn get_thumbnail(file_path: &str, size: Option<u32>) -> Result<String, Strin
         "jpg" | "jpeg" | "png" | "gif" | "webp" | "bmp" | "ico" | "tiff" | "tif" => {
             generate_image_thumbnail(path, size)?
         }
+        // SVG (vector graphics)
+        "svg" => generate_svg_thumbnail(path, size)?,
         // Videos
         "mp4" | "mov" | "avi" | "mkv" | "webm" | "wmv" | "flv" => {
             generate_video_thumbnail(path, size)?

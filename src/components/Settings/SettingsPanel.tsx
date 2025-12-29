@@ -3,6 +3,7 @@ import { invoke } from '@tauri-apps/api/core';
 import { X, Eye, EyeOff, Check, Loader2, FolderOpen } from 'lucide-react';
 import { cn } from '../../lib/utils';
 import { useWatcher } from '../../hooks/useAutoRename';
+import { useSyncedSettings } from '../../hooks/useSyncedSettings';
 import { showSuccess, showError } from '../../stores/toast-store';
 
 interface SettingsPanelProps {
@@ -25,6 +26,7 @@ export function SettingsPanel({ isOpen, onClose }: SettingsPanelProps) {
   const [loadingWatcher, setLoadingWatcher] = useState(false);
 
   const { startWatcher, stopWatcher, getStatus } = useWatcher();
+  const { watchDownloads, updateSettings } = useSyncedSettings();
 
   // Load initial state
   useEffect(() => {
@@ -39,6 +41,11 @@ export function SettingsPanel({ isOpen, onClose }: SettingsPanelProps) {
       setWatchingPath(status.watchingPath);
     });
   }, [isOpen, getStatus]);
+
+  // Sync local watcher state with settings store
+  useEffect(() => {
+    setWatcherEnabled(watchDownloads);
+  }, [watchDownloads]);
 
   const handleSaveApiKey = async () => {
     if (!apiKey.trim()) return;
@@ -84,12 +91,16 @@ export function SettingsPanel({ isOpen, onClose }: SettingsPanelProps) {
         await stopWatcher();
         setWatcherEnabled(false);
         setWatchingPath(null);
+        // Save the setting to local store and Convex
+        await updateSettings({ watchDownloads: false });
       } else {
         const success = await startWatcher();
         if (success) {
           const status = await getStatus();
           setWatcherEnabled(status.enabled);
           setWatchingPath(status.watchingPath);
+          // Save the setting to local store and Convex
+          await updateSettings({ watchDownloads: true });
         }
       }
     } finally {

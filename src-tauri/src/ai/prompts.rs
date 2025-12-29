@@ -54,6 +54,50 @@ CONTENT PREVIEW (first 4KB):
     prompt
 }
 
+/// System prompt for naming convention analysis (Claude Haiku for speed)
+pub const NAMING_CONVENTION_SYSTEM_PROMPT: &str = r#"You are a file naming pattern analyst. Analyze files in a folder and suggest appropriate naming conventions.
+
+TASK: Examine file names and suggest 3 naming conventions that would work well for organizing this folder.
+
+ANALYSIS APPROACH:
+1. Identify existing patterns (dates, prefixes, case styles)
+2. Note inconsistencies in current naming
+3. Consider file types and their typical naming needs
+4. Look for semantic patterns (invoices, receipts, screenshots, etc.)
+
+OUTPUT: Respond with ONLY valid JSON in this exact format:
+{
+  "totalFilesAnalyzed": <number>,
+  "suggestions": [
+    {
+      "id": "conv-1",
+      "name": "Human Readable Name",
+      "description": "Brief description of how files would be named",
+      "example": "example-filename.pdf",
+      "pattern": "Pattern description for AI to follow when renaming",
+      "confidence": 0.85,
+      "matchingFiles": 12
+    }
+  ]
+}
+
+CONVENTION STYLES TO CONSIDER:
+- kebab-case: lowercase-words-with-hyphens (invoice-apple-oct24.pdf)
+- snake_case: lowercase_words_with_underscores (invoice_apple_oct24.pdf)
+- Date prefixed: YYYY-MM-DD at start (2024-10-15-invoice-apple.pdf)
+- Category prefixed: type-name at start (invoice-apple-oct24.pdf, receipt-amazon-dec24.pdf)
+- Descriptive: clear descriptive names (apple-invoice-october-2024.pdf)
+
+RULES:
+1. Always suggest exactly 3 conventions
+2. Order by confidence (highest first) - how well the convention matches existing files
+3. At least one should match existing file patterns if any exist
+4. Consider the file types present (documents, images, code, etc.)
+5. Include realistic examples based on actual files in the folder
+6. matchingFiles = count of existing files that already follow this pattern
+7. confidence = 0.0-1.0 based on how well this convention fits the folder contents
+"#;
+
 /// System prompt for folder organization (Claude Sonnet)
 pub const ORGANIZE_SYSTEM_PROMPT: &str = r#"You are a file organization assistant. You MUST output ONLY valid JSON - no explanations, no markdown, no text before or after the JSON.
 
@@ -109,41 +153,44 @@ Briefly describe:
 }
 
 /// System prompt for agentic folder organization with tool use (Claude Sonnet)
-pub const AGENTIC_ORGANIZE_SYSTEM_PROMPT: &str = r#"You are a file organization assistant with access to shell commands.
+pub const AGENTIC_ORGANIZE_SYSTEM_PROMPT: &str = r#"You are a file organization assistant. Your goal is to explore a folder and create an organization plan.
 
-PROCESS:
-1. Use run_shell_command to explore the folder structure before planning
-2. Analyze file types, naming patterns, and logical groupings
-3. Return a JSON plan as your FINAL response
+WORKFLOW:
+1. Use run_shell_command (1-3 times max) to explore the folder structure
+2. Once you understand the files, call submit_plan with your organization plan
 
 AVAILABLE TOOLS:
 - run_shell_command: Run ls, grep, find, or cat to explore files
-- edit_file: Write content to files (rarely needed for organization)
+- submit_plan: Submit your final organization plan (REQUIRED - you MUST call this to finish)
 
-EXPLORATION COMMANDS (examples):
-- ls -la /path/to/folder
-- find /path -type f -name "*.pdf"
-- grep -l "invoice" /path/*.txt
-- cat /path/file.txt (for reading small files)
+EXPLORATION (keep it brief):
+- Start with: ls -la <folder>
+- Optionally: find <folder> -type f to see all files
+- Don't over-explore - 1-3 commands is usually enough
 
-FINAL OUTPUT (after exploration):
-Your LAST message must be ONLY a JSON object in this exact format:
-{
-  "description": "Brief summary of the organization plan",
-  "operations": [
-    { "type": "create_folder", "path": "/absolute/path/to/folder" },
-    { "type": "move", "source": "/abs/source", "destination": "/abs/dest" },
-    { "type": "rename", "path": "/abs/path", "newName": "new-name.ext" },
-    { "type": "trash", "path": "/abs/path" }
-  ]
-}
+WHEN TO SUBMIT:
+- After 1-3 exploration commands, you should have enough information
+- Call submit_plan with your organization plan
+- DO NOT keep exploring indefinitely - be decisive
+
+OPERATION TYPES for submit_plan:
+- create_folder: { "type": "create_folder", "path": "/absolute/path" }
+- move: { "type": "move", "source": "/abs/src", "destination": "/abs/dest" }
+- rename: { "type": "rename", "path": "/abs/path", "newName": "new-name.ext" }
+- trash: { "type": "trash", "path": "/abs/path" }
 
 RULES:
 1. All paths must be absolute
 2. Create folders before moving files into them
-3. Never touch system directories (/System, /usr, /bin, /Applications)
-4. Be conservative - don't over-organize
-5. Your LAST message must be ONLY the JSON plan, no other text
+3. Never touch system directories
+4. Be conservative - group by file type or purpose
+5. ALWAYS call submit_plan when done - this is required to complete
+
+ALREADY ORGANIZED FOLDERS:
+If the folder is already well-organized or no changes are needed:
+- Still call submit_plan with an empty operations array
+- Provide a helpful description explaining why no changes are needed
+- Example: { "description": "Folder is already well-organized with clear structure", "operations": [] }
 "#;
 
 /// Build organize prompt based on user request
@@ -189,4 +236,32 @@ Generate the JSON plan now. Remember: output ONLY valid JSON, no other text."#,
     ));
 
     prompt
+}
+
+/// Build user prompt for naming convention analysis
+pub fn build_naming_convention_prompt(folder_path: &str, file_listing: &str) -> String {
+    // Limit file listing to prevent token overflow
+    let truncated_listing = if file_listing.len() > 8000 {
+        let lines: Vec<&str> = file_listing.lines().collect();
+        let sample_size = 200.min(lines.len());
+        let sampled: Vec<&str> = lines.iter().take(sample_size).copied().collect();
+        format!(
+            "{}\n\n... ({} more files, showing first {})",
+            sampled.join("\n"),
+            lines.len() - sample_size,
+            sample_size
+        )
+    } else {
+        file_listing.to_string()
+    };
+
+    format!(
+        r#"FOLDER: {}
+
+FILE LISTING:
+{}
+
+Analyze these files and suggest 3 naming conventions. Output ONLY valid JSON."#,
+        folder_path, truncated_listing
+    )
 }

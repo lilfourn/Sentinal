@@ -11,7 +11,7 @@ import {
   FileJson,
   type LucideIcon,
 } from 'lucide-react';
-import { ContextMenu, buildFileContextMenuItems, type ContextMenuPosition } from '../ContextMenu/ContextMenu';
+import { ContextMenu, buildFileContextMenuItems, buildBackgroundContextMenuItems, type ContextMenuPosition } from '../ContextMenu/ContextMenu';
 import { FolderIcon } from '../icons/FolderIcon';
 import { SelectionOverlay } from './SelectionOverlay';
 import { useNavigationStore } from '../../stores/navigation-store';
@@ -19,7 +19,7 @@ import { useSelectionStore } from '../../stores/selection-store';
 import { useOrganizeStore } from '../../stores/organize-store';
 import { showSuccess, showError } from '../../stores/toast-store';
 import { useMarqueeSelection } from '../../hooks/useMarqueeSelection';
-import { cn, getFileType } from '../../lib/utils';
+import { cn, getFileType, openFile } from '../../lib/utils';
 import type { FileEntry } from '../../types/file';
 
 interface FileColumnsViewProps {
@@ -47,12 +47,13 @@ function getFileIcon(entry: FileEntry): LucideIcon | null {
 export function FileColumnsView({ entries }: FileColumnsViewProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const columnsRef = useRef<HTMLDivElement>(null);
-  const { navigateTo, setQuickLookPath } = useNavigationStore();
+  const { navigateTo, setQuickLookPath, currentPath } = useNavigationStore();
   const {
     selectedPaths,
     select,
     selectRange,
     clearSelection,
+    startCreating,
   } = useSelectionStore();
   const { startOrganize } = useOrganizeStore();
 
@@ -77,11 +78,14 @@ export function FileColumnsView({ entries }: FileColumnsViewProps) {
     updateItemPositions(items);
   }, [entries, updateItemPositions]);
 
-  // Context menu state
+  // Context menu state (for file/folder items)
   const [contextMenu, setContextMenu] = useState<{
     position: ContextMenuPosition;
     entry: FileEntry;
   } | null>(null);
+
+  // Background context menu state (for empty space)
+  const [backgroundContextMenu, setBackgroundContextMenu] = useState<ContextMenuPosition | null>(null);
 
   const handleClick = useCallback(
     (entry: FileEntry, e: React.MouseEvent) => {
@@ -101,9 +105,11 @@ export function FileColumnsView({ entries }: FileColumnsViewProps) {
   );
 
   const handleDoubleClick = useCallback(
-    (entry: FileEntry) => {
+    async (entry: FileEntry) => {
       if (entry.isDirectory) {
         navigateTo(entry.path);
+      } else {
+        await openFile(entry.path);
       }
     },
     [navigateTo]
@@ -116,8 +122,17 @@ export function FileColumnsView({ entries }: FileColumnsViewProps) {
     if (e.target === e.currentTarget || e.target === columnsRef.current) {
       clearSelection();
       setContextMenu(null);
+      setBackgroundContextMenu(null);
     }
   }, [clearSelection, justFinishedDragging]);
+
+  // Handle right-click on empty space (background)
+  // File items call e.stopPropagation(), so only background clicks reach here
+  const handleBackgroundContextMenu = useCallback((e: React.MouseEvent) => {
+    e.preventDefault();
+    setContextMenu(null); // Close file context menu if open
+    setBackgroundContextMenu({ x: e.clientX, y: e.clientY });
+  }, []);
 
   const handleContainerMouseDown = useCallback((e: React.MouseEvent) => {
     const target = e.target as HTMLElement;
@@ -166,6 +181,7 @@ export function FileColumnsView({ entries }: FileColumnsViewProps) {
       ref={containerRef}
       onClick={handleContainerClick}
       onMouseDown={handleContainerMouseDown}
+      onContextMenu={handleBackgroundContextMenu}
       className="relative h-full overflow-auto p-4 focus:outline-none select-none"
       tabIndex={0}
     >
@@ -220,7 +236,7 @@ export function FileColumnsView({ entries }: FileColumnsViewProps) {
       {/* Selection overlay (marquee rectangle) */}
       {isDragging && <SelectionOverlay rect={selectionRect} />}
 
-      {/* Context Menu */}
+      {/* Context Menu (for files/folders) */}
       {contextMenu && (
         <ContextMenu
           position={contextMenu.position}
@@ -231,9 +247,11 @@ export function FileColumnsView({ entries }: FileColumnsViewProps) {
               isDirectory: contextMenu.entry.isDirectory,
             },
             {
-              onOpen: () => {
+              onOpen: async () => {
                 if (contextMenu.entry.isDirectory) {
                   navigateTo(contextMenu.entry.path);
+                } else {
+                  await openFile(contextMenu.entry.path);
                 }
               },
               onOrganizeWithAI: () => {
@@ -245,6 +263,22 @@ export function FileColumnsView({ entries }: FileColumnsViewProps) {
             }
           )}
           onClose={() => setContextMenu(null)}
+        />
+      )}
+
+      {/* Background Context Menu (for empty space) */}
+      {backgroundContextMenu && (
+        <ContextMenu
+          position={backgroundContextMenu}
+          items={buildBackgroundContextMenuItems({
+            onNewFolder: () => {
+              startCreating('folder', currentPath);
+            },
+            onNewFile: () => {
+              startCreating('file', currentPath);
+            },
+          })}
+          onClose={() => setBackgroundContextMenu(null)}
         />
       )}
     </div>

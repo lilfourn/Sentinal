@@ -1,6 +1,6 @@
 use crate::security::PathValidator;
 use duct::cmd;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// Whitelist of allowed shell commands
 const ALLOWED_COMMANDS: &[&str] = &["ls", "grep", "find", "cat"];
@@ -103,28 +103,17 @@ fn execute_edit_file(
 }
 
 /// Validate that a path is within the allowed base directory
+///
+/// NOTE: Uses lexical comparison instead of canonicalize() because macOS has
+/// issues with canonicalize() on paths containing apostrophes/special chars.
+/// See: https://doc.rust-lang.org/std/fs/fn.canonicalize.html
 fn validate_path_within(path: &Path, base: &Path) -> Result<(), String> {
-    // Try to canonicalize the path
-    let canonical = if path.exists() {
-        path.canonicalize()
-            .map_err(|e| format!("Cannot resolve path: {}", e))?
-    } else {
-        // Path may not exist yet, check parent
-        let parent = path.parent().ok_or("Invalid path: no parent directory")?;
-        if !parent.exists() {
-            return Err(format!("Parent directory does not exist: {:?}", parent));
-        }
-        let parent_canonical = parent
-            .canonicalize()
-            .map_err(|e| format!("Cannot resolve parent path: {}", e))?;
-        parent_canonical.join(path.file_name().unwrap_or_default())
-    };
+    // Normalize both paths lexically (resolve . and .., make absolute)
+    let normalized_path = normalize_path(path)?;
+    let normalized_base = normalize_path(base)?;
 
-    let base_canonical = base
-        .canonicalize()
-        .map_err(|e| format!("Cannot resolve base path: {}", e))?;
-
-    if !canonical.starts_with(&base_canonical) {
+    // Check that path starts with base
+    if !normalized_path.starts_with(&normalized_base) {
         return Err(format!(
             "Path {} is outside allowed directory {}",
             path.display(),
@@ -132,7 +121,51 @@ fn validate_path_within(path: &Path, base: &Path) -> Result<(), String> {
         ));
     }
 
+    // Additional check: ensure no path traversal after normalization
+    let relative = normalized_path
+        .strip_prefix(&normalized_base)
+        .map_err(|_| "Path is outside allowed directory")?;
+
+    // Reject if the relative path tries to escape (shouldn't happen after normalization, but safety check)
+    for component in relative.components() {
+        if let std::path::Component::ParentDir = component {
+            return Err("Path traversal detected".to_string());
+        }
+    }
+
     Ok(())
+}
+
+/// Normalize a path lexically without filesystem access
+/// This avoids macOS canonicalize() issues with special characters like apostrophes
+fn normalize_path(path: &Path) -> Result<PathBuf, String> {
+    use std::path::Component;
+
+    let mut normalized = PathBuf::new();
+
+    // Make path absolute if it isn't already
+    let absolute_path = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .map_err(|e| format!("Cannot get current directory: {}", e))?
+            .join(path)
+    };
+
+    for component in absolute_path.components() {
+        match component {
+            Component::Prefix(prefix) => normalized.push(prefix.as_os_str()),
+            Component::RootDir => normalized.push("/"),
+            Component::CurDir => {} // Skip .
+            Component::ParentDir => {
+                // Go up one directory
+                normalized.pop();
+            }
+            Component::Normal(name) => normalized.push(name),
+        }
+    }
+
+    Ok(normalized)
 }
 
 /// Truncate output to max size with indicator

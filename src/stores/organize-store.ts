@@ -1,6 +1,7 @@
 import { create } from 'zustand';
 import { invoke } from '@tauri-apps/api/core';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
+import type { NamingConvention, NamingConventionSuggestions } from '../types/naming-convention';
 
 export interface OrganizeOperation {
   opId: string;
@@ -23,6 +24,7 @@ export interface OrganizePlan {
 export type ThoughtType =
   | 'scanning'
   | 'analyzing'
+  | 'naming_conventions'
   | 'planning'
   | 'thinking'
   | 'executing'
@@ -63,6 +65,12 @@ interface OrganizeState {
   // Recovery state
   hasInterruptedJob: boolean;
   interruptedJob: InterruptedJobInfo | null;
+
+  // Naming convention selection state
+  awaitingConventionSelection: boolean;
+  suggestedConventions: NamingConvention[] | null;
+  selectedConvention: NamingConvention | null;
+  conventionSkipped: boolean;
 }
 
 // Info about an interrupted job for recovery UI
@@ -101,6 +109,10 @@ interface OrganizeActions {
   checkForInterruptedJob: () => Promise<void>;
   dismissInterruptedJob: () => Promise<void>;
   resumeInterruptedJob: () => Promise<void>;
+
+  // Naming convention actions
+  selectConvention: (convention: NamingConvention) => void;
+  skipConventionSelection: () => void;
 }
 
 let thoughtId = 0;
@@ -170,6 +182,10 @@ export const useOrganizeStore = create<OrganizeState & OrganizeActions>((set, ge
   currentOpIndex: -1,
   hasInterruptedJob: false,
   interruptedJob: null,
+  awaitingConventionSelection: false,
+  suggestedConventions: null,
+  selectedConvention: null,
+  conventionSkipped: false,
 
   // Thought actions
   addThought: (type, content, detail) => set((state) => ({
@@ -188,6 +204,7 @@ export const useOrganizeStore = create<OrganizeState & OrganizeActions>((set, ge
   clearThoughts: () => set({ thoughts: [], currentPhase: 'scanning' }),
 
   // Start automatic organize flow with thinking stream
+  // Phase 1: Scan folder and get naming convention suggestions
   startOrganize: async (folderPath: string) => {
     const state = get();
     state.clearThoughts();
@@ -213,6 +230,10 @@ export const useOrganizeStore = create<OrganizeState & OrganizeActions>((set, ge
       executedOps: [],
       failedOp: null,
       currentOpIndex: -1,
+      awaitingConventionSelection: false,
+      suggestedConventions: null,
+      selectedConvention: null,
+      conventionSkipped: false,
     });
 
     const folderName = folderPath.split('/').pop() || 'folder';
@@ -232,92 +253,31 @@ export const useOrganizeStore = create<OrganizeState & OrganizeActions>((set, ge
         // Event listener failed, continue without it
       }
 
-      // Use the new agentic command that explores and generates plan
-      state.addThought('analyzing', 'AI agent exploring folder...', 'Using tools to understand file structure');
+      // Get naming convention suggestions
+      state.addThought('analyzing', 'Analyzing naming patterns...', 'Detecting existing file conventions');
 
-      const rawPlan = await invoke<OrganizePlan>('generate_organize_plan_agentic', {
+      const suggestions = await invoke<NamingConventionSuggestions>('suggest_naming_conventions', {
         folderPath,
-        userRequest: 'Organize this folder by grouping files based on their content type and purpose. Create logical folder structures.',
       });
 
       // Clean up listener
       if (unlisten) unlisten();
 
-      // Add risk levels to operations (backend doesn't include them)
-      const plan = addRiskLevels(rawPlan);
+      // Pause for user selection
+      state.addThought('naming_conventions', 'Select a naming convention',
+        `Found ${suggestions.suggestions.length} patterns`);
 
-      state.addThought('planning', `Plan ready: ${plan.operations.length} operations`, plan.description);
+      set({
+        isAnalyzing: false,
+        awaitingConventionSelection: true,
+        suggestedConventions: suggestions.suggestions,
+        currentPhase: 'naming_conventions',
+      });
 
-      set({ currentPlan: plan, isAnalyzing: false });
-
-      // Persist the plan to job state
-      const currentJobId = get().currentJobId;
-      if (currentJobId && !currentJobId.startsWith('local-')) {
-        try {
-          await invoke('set_job_plan', {
-            jobId: currentJobId,
-            planId: plan.planId,
-            description: plan.description,
-            operations: plan.operations,
-            targetFolder: plan.targetFolder,
-          });
-        } catch (e) {
-          console.error('[Organize] Failed to persist plan:', e);
-        }
-      }
-
-      // Phase 4: Executing
-      state.addThought('executing', 'Starting execution...', 'Applying changes to folder');
-      set({ isExecuting: true });
-
-      for (let i = 0; i < plan.operations.length; i++) {
-        const op = plan.operations[i];
-        get().setCurrentOpIndex(i);
-
-        const opName = getOperationDescription(op);
-        state.addThought('executing', opName, `Operation ${i + 1} of ${plan.operations.length}`);
-
-        try {
-          await executeOperation(op);
-          get().markOpExecuted(op.opId);
-
-          // Persist progress
-          const jobId = get().currentJobId;
-          if (jobId && !jobId.startsWith('local-')) {
-            invoke('complete_job_operation', { jobId, opId: op.opId, currentIndex: i }).catch(console.error);
-          }
-
-          await new Promise(resolve => setTimeout(resolve, 100));
-        } catch (error) {
-          state.addThought('error', `Failed: ${opName}`, String(error));
-          get().markOpFailed(op.opId);
-
-          // Persist failure
-          const jobId = get().currentJobId;
-          if (jobId && !jobId.startsWith('local-')) {
-            invoke('fail_organize_job', { jobId, error: String(error) }).catch(console.error);
-          }
-
-          console.error(`Operation failed: ${op.type}`, error);
-          return;
-        }
-      }
-
-      // Phase 5: Complete
-      state.addThought('complete', 'Organization complete!', `Successfully executed ${plan.operations.length} operations`);
-      get().setCurrentOpIndex(-1);
-      get().setExecuting(false);
-
-      // Mark job as complete and clear
-      const finalJobId = get().currentJobId;
-      if (finalJobId && !finalJobId.startsWith('local-')) {
-        invoke('complete_organize_job', { jobId: finalJobId }).catch(console.error);
-        // Clear job file after successful completion
-        setTimeout(() => invoke('clear_organize_job').catch(console.error), 1000);
-      }
+      // Flow continues when user calls selectConvention() or skipConventionSelection()
 
     } catch (error) {
-      state.addThought('error', 'Organization failed', String(error));
+      state.addThought('error', 'Analysis failed', String(error));
 
       // Persist error
       const jobId = get().currentJobId;

@@ -193,6 +193,27 @@ pub async fn create_directory(path: String) -> Result<(), String> {
     Ok(())
 }
 
+/// Create a new empty file
+#[tauri::command]
+pub async fn create_file(path: String) -> Result<(), String> {
+    let path = Path::new(&path);
+
+    if path.exists() {
+        return Err(format!("Path already exists: {:?}", path));
+    }
+
+    // Ensure parent directory exists
+    if let Some(parent) = path.parent() {
+        if !parent.exists() {
+            return Err(format!("Parent directory does not exist: {:?}", parent));
+        }
+    }
+
+    std::fs::File::create(path).map_err(|e| format!("Failed to create file: {}", e))?;
+
+    Ok(())
+}
+
 /// Move a file or directory
 #[tauri::command]
 pub async fn move_file(source: String, destination: String) -> Result<(), String> {
@@ -291,6 +312,23 @@ pub fn get_user_directories() -> Result<Vec<(String, String)>, String> {
     }
 
     Ok(dirs_list)
+}
+
+/// Open a file with the system's default application
+#[tauri::command]
+pub async fn open_file(path: String) -> Result<(), String> {
+    let path = Path::new(&path);
+
+    if !path.exists() {
+        return Err(format!("File not found: {}", path.display()));
+    }
+
+    if path.is_dir() {
+        return Err("Cannot open directories with this command".to_string());
+    }
+
+    tauri_plugin_opener::open_path(path.to_str().unwrap_or_default(), None::<&str>)
+        .map_err(|e| format!("Failed to open file: {}", e))
 }
 
 /// Helper function to copy a directory recursively

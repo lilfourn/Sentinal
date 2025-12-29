@@ -10,6 +10,7 @@ pub struct ToolDefinition {
 }
 
 /// Tool use request from Claude (content block)
+#[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize)]
 pub struct ToolUseBlock {
     pub id: String,
@@ -70,21 +71,48 @@ pub fn get_organize_tools() -> Vec<ToolDefinition> {
             }),
         },
         ToolDefinition {
-            name: "edit_file".to_string(),
-            description: "Write content to a file. Path must be within the target folder. Use sparingly - mainly for organization, not file editing.".to_string(),
+            name: "submit_plan".to_string(),
+            description: "Submit the final organization plan. Call this tool ONCE when you are done exploring and ready to submit your plan. This ends the conversation.".to_string(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
-                    "path": {
+                    "description": {
                         "type": "string",
-                        "description": "Absolute path to the file to write"
+                        "description": "Brief summary of what this organization plan does"
                     },
-                    "content": {
-                        "type": "string",
-                        "description": "Content to write to the file"
+                    "operations": {
+                        "type": "array",
+                        "description": "List of operations to perform",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "type": {
+                                    "type": "string",
+                                    "enum": ["create_folder", "move", "rename", "trash"],
+                                    "description": "Operation type"
+                                },
+                                "path": {
+                                    "type": "string",
+                                    "description": "Absolute path (for create_folder, rename, trash)"
+                                },
+                                "source": {
+                                    "type": "string",
+                                    "description": "Source path (for move)"
+                                },
+                                "destination": {
+                                    "type": "string",
+                                    "description": "Destination path (for move)"
+                                },
+                                "newName": {
+                                    "type": "string",
+                                    "description": "New filename (for rename)"
+                                }
+                            },
+                            "required": ["type"]
+                        }
                     }
                 },
-                "required": ["path", "content"]
+                "required": ["description", "operations"]
             }),
         },
     ]

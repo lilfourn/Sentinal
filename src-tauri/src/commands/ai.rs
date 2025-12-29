@@ -248,6 +248,100 @@ pub async fn generate_organize_plan_agentic(
         .await
 }
 
+/// Suggest naming conventions for a folder
+#[tauri::command]
+pub async fn suggest_naming_conventions(
+    folder_path: String,
+    app_handle: tauri::AppHandle,
+) -> Result<crate::ai::NamingConventionSuggestions, String> {
+    use tauri::Emitter;
+
+    let path = std::path::Path::new(&folder_path);
+    if !path.exists() || !path.is_dir() {
+        return Err(format!("Invalid folder path: {}", folder_path));
+    }
+
+    // Emit progress event
+    let _ = app_handle.emit(
+        "ai-thought",
+        serde_json::json!({
+            "type": "naming_conventions",
+            "content": "Analyzing file naming patterns...",
+        }),
+    );
+
+    // Build file listing (just top-level files for naming analysis)
+    let mut file_listing = String::new();
+    let entries = std::fs::read_dir(path)
+        .map_err(|e| format!("Failed to read directory: {}", e))?;
+
+    for entry in entries.filter_map(|e| e.ok()) {
+        let name = entry.file_name().to_string_lossy().to_string();
+        let file_type = entry.file_type().map_err(|e| e.to_string())?;
+
+        if file_type.is_file() {
+            file_listing.push_str(&format!("{}\n", name));
+        }
+    }
+
+    if file_listing.is_empty() {
+        return Err("No files found in folder".to_string());
+    }
+
+    // Get AI suggestions
+    let client = AnthropicClient::new();
+    let suggestions = client
+        .suggest_naming_conventions(&folder_path, &file_listing)
+        .await?;
+
+    let _ = app_handle.emit(
+        "ai-thought",
+        serde_json::json!({
+            "type": "naming_conventions",
+            "content": format!("Found {} naming conventions", suggestions.suggestions.len()),
+        }),
+    );
+
+    Ok(suggestions)
+}
+
+/// Generate organize plan with selected naming convention
+#[tauri::command]
+pub async fn generate_organize_plan_with_convention(
+    folder_path: String,
+    user_request: String,
+    convention: Option<crate::ai::NamingConvention>,
+    app_handle: tauri::AppHandle,
+) -> Result<crate::jobs::OrganizePlan, String> {
+    use tauri::Emitter;
+
+    let client = AnthropicClient::new();
+
+    let emit = |thought_type: &str, content: &str| {
+        let _ = app_handle.emit(
+            "ai-thought",
+            serde_json::json!({
+                "type": thought_type,
+                "content": content,
+            }),
+        );
+    };
+
+    // Build modified request with convention if provided
+    let full_request = if let Some(ref conv) = convention {
+        format!(
+            "{}\n\nIMPORTANT - NAMING CONVENTION TO APPLY:\nWhen renaming files, use the '{}' convention.\nPattern: {}\nExample: {}\n\nApply this naming style consistently to all file rename operations.",
+            user_request, conv.name, conv.pattern, conv.example
+        )
+    } else {
+        user_request
+    };
+
+    client
+        .run_agentic_organize(&folder_path, &full_request, emit)
+        .await
+}
+
 /// Helper to build ls -R style output
 fn build_ls_output(
     root: &std::path::Path,

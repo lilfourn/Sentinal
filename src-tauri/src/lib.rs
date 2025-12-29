@@ -24,11 +24,13 @@ pub fn run() {
             rename_file,
             delete_to_trash,
             create_directory,
+            create_file,
             move_file,
             copy_file,
             get_home_directory,
             get_downloads_directory,
             get_user_directories,
+            open_file,
             // Watcher commands
             start_downloads_watcher,
             stop_downloads_watcher,
@@ -43,6 +45,8 @@ pub fn run() {
             build_folder_context,
             generate_organize_plan,
             generate_organize_plan_agentic,
+            suggest_naming_conventions,
+            generate_organize_plan_with_convention,
             // Job persistence commands
             start_organize_job,
             set_job_plan,
