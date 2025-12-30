@@ -49,15 +49,15 @@ pub struct ConversationMessage {
 #[serde(tag = "type")]
 enum StreamEvent {
     #[serde(rename = "message_start")]
-    MessageStart { message: Value },
+    MessageStart { #[allow(dead_code)] message: Value },
     #[serde(rename = "content_block_start")]
-    ContentBlockStart { index: usize, content_block: Value },
+    ContentBlockStart { #[allow(dead_code)] index: usize, content_block: Value },
     #[serde(rename = "content_block_delta")]
-    ContentBlockDelta { index: usize, delta: Value },
+    ContentBlockDelta { #[allow(dead_code)] index: usize, delta: Value },
     #[serde(rename = "content_block_stop")]
-    ContentBlockStop { index: usize },
+    ContentBlockStop { #[allow(dead_code)] index: usize },
     #[serde(rename = "message_delta")]
-    MessageDelta { delta: Value, usage: Option<Value> },
+    MessageDelta { delta: Value, #[allow(dead_code)] usage: Option<Value> },
     #[serde(rename = "message_stop")]
     MessageStop,
     #[serde(rename = "ping")]
@@ -163,7 +163,7 @@ pub async fn run_chat_agent(
         }
 
         // Process streaming response
-        let (stop_reason, has_tool_use, assistant_content, tool_results, iteration_text) =
+        let (stop_reason, has_tool_use, assistant_content, tool_results, _iteration_text) =
             process_stream(app, response, &mut final_response).await?;
 
         // Add assistant message to history

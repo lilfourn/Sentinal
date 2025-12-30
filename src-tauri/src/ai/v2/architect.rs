@@ -16,8 +16,6 @@
 
 use crate::ai::client::ClaudeModel;
 use crate::ai::credentials::CredentialManager;
-use crate::ai::rules::VirtualFile;
-
 use super::agent_loop::ExpandableDetail;
 use super::rate_limiter::RateLimitManager;
 use super::sampling;

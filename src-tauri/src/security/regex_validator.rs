@@ -28,6 +28,7 @@ const DANGEROUS_PATTERNS: &[&str] = &[
 
 /// Error type for regex validation
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct RegexValidationError {
     pub message: String,
     pub kind: RegexValidationErrorKind,
@@ -87,7 +88,7 @@ pub fn validate_regex_complexity(pattern: &str) -> Result<(), RegexValidationErr
     }
 
     // 2. Check for known dangerous patterns
-    let pattern_lower = pattern.to_lowercase();
+    let _pattern_lower = pattern.to_lowercase();
     for dangerous in DANGEROUS_PATTERNS {
         // Check if the dangerous pattern appears as a substring (simplified check)
         // More sophisticated check would parse the AST

@@ -6,12 +6,22 @@
 //! ## Concurrency Safety
 //! Uses file locking via fs2 to prevent race conditions when multiple
 //! parallel operations update the same journal simultaneously.
+//!
+//! ## Durability
+//! Uses atomic writes with fsync to ensure data integrity even on crash.
 
 use super::entry::{WALJournal, WALStatus};
+use super::io::atomic_write;
 use fs2::FileExt;
 use std::fs::{self, File, OpenOptions};
 use std::path::PathBuf;
 use uuid::Uuid;
+
+/// Maximum number of entries allowed in a single journal
+pub const MAX_JOURNAL_ENTRIES: usize = 10_000;
+
+/// Maximum serialized size of a journal (10 MB)
+pub const MAX_JOURNAL_SIZE: usize = 10 * 1024 * 1024;
 
 /// Error type for WAL operations
 #[derive(Debug, Clone)]
@@ -26,6 +36,7 @@ pub enum WALErrorKind {
     SerializationError,
     NotFound,
     InvalidState,
+    LimitExceeded,
 }
 
 impl std::fmt::Display for WALError {
@@ -118,15 +129,37 @@ impl WALManager {
         Ok(lock_file)
     }
 
-    /// Save a journal to disk
+    /// Save a journal to disk (acquires lock)
     ///
-    /// Writes atomically by writing to a temp file first, then renaming.
-    /// This ensures we never have a corrupted journal on disk.
+    /// Writes atomically with fsync to ensure durability on crash.
+    /// This method acquires an exclusive lock before writing.
+    ///
+    /// For use within methods that already hold the lock, use `save_journal_internal`.
     pub fn save_journal(&self, journal: &WALJournal) -> Result<(), WALError> {
+        let _lock = self.acquire_lock(&journal.job_id)?;
+        self.save_journal_internal(journal)
+    }
+
+    /// Save a journal to disk (internal - lock must be held by caller)
+    ///
+    /// This internal method assumes the caller already holds the lock.
+    /// Use `save_journal` for external calls.
+    fn save_journal_internal(&self, journal: &WALJournal) -> Result<(), WALError> {
         self.ensure_dir()?;
 
+        // Check entry count limit
+        if journal.entries.len() > MAX_JOURNAL_ENTRIES {
+            return Err(WALError {
+                message: format!(
+                    "Journal exceeds maximum entry count: {} > {}",
+                    journal.entries.len(),
+                    MAX_JOURNAL_ENTRIES
+                ),
+                kind: WALErrorKind::LimitExceeded,
+            });
+        }
+
         let path = self.journal_path(&journal.job_id);
-        let temp_path = self.wal_dir.join(format!("{}.wal.tmp", journal.job_id));
 
         // Serialize to JSON
         let json = serde_json::to_string_pretty(journal).map_err(|e| WALError {
@@ -134,21 +167,28 @@ impl WALManager {
             kind: WALErrorKind::SerializationError,
         })?;
 
-        // Write to temp file
-        fs::write(&temp_path, &json).map_err(|e| WALError {
-            message: format!("Failed to write journal temp file: {}", e),
-            kind: WALErrorKind::IoError,
-        })?;
+        // Check size limit
+        if json.len() > MAX_JOURNAL_SIZE {
+            return Err(WALError {
+                message: format!(
+                    "Journal exceeds maximum size: {} bytes > {} bytes",
+                    json.len(),
+                    MAX_JOURNAL_SIZE
+                ),
+                kind: WALErrorKind::LimitExceeded,
+            });
+        }
 
-        // Atomic rename
-        fs::rename(&temp_path, &path).map_err(|e| WALError {
-            message: format!("Failed to rename journal file: {}", e),
+        // Use atomic write with fsync for durability
+        atomic_write(&path, json.as_bytes()).map_err(|e| WALError {
+            message: format!("Failed to write journal: {}", e),
             kind: WALErrorKind::IoError,
         })?;
 
         tracing::debug!(
             job_id = %journal.job_id,
             entries = journal.entries.len(),
+            size_bytes = json.len(),
             "Saved WAL journal"
         );
 
@@ -260,7 +300,8 @@ impl WALManager {
         })?;
 
         entry.mark_complete();
-        self.save_journal(&journal)?;
+        // Use internal save since we already hold the lock
+        self.save_journal_internal(&journal)?;
 
         // Lock is automatically released when _lock is dropped
         tracing::debug!(entry_id = %entry_id, "Marked WAL entry complete");
@@ -290,7 +331,8 @@ impl WALManager {
         })?;
 
         entry.mark_failed(error.clone());
-        self.save_journal(&journal)?;
+        // Use internal save since we already hold the lock
+        self.save_journal_internal(&journal)?;
 
         // Lock is automatically released when _lock is dropped
         tracing::debug!(entry_id = %entry_id, error = %error, "Marked WAL entry failed");
@@ -315,7 +357,8 @@ impl WALManager {
         })?;
 
         entry.mark_in_progress();
-        self.save_journal(&journal)?;
+        // Use internal save since we already hold the lock
+        self.save_journal_internal(&journal)?;
 
         // Lock is automatically released when _lock is dropped
         tracing::debug!(entry_id = %entry_id, "Marked WAL entry in progress");
@@ -340,7 +383,8 @@ impl WALManager {
         })?;
 
         entry.mark_rolled_back();
-        self.save_journal(&journal)?;
+        // Use internal save since we already hold the lock
+        self.save_journal_internal(&journal)?;
 
         // Lock is automatically released when _lock is dropped
         tracing::debug!(entry_id = %entry_id, "Marked WAL entry rolled back");
@@ -348,7 +392,12 @@ impl WALManager {
     }
 
     /// Discard (delete) a journal after successful completion
+    ///
+    /// Acquires lock before deletion to prevent race conditions.
     pub fn discard_journal(&self, job_id: &str) -> Result<(), WALError> {
+        // Acquire lock before deletion to prevent races
+        let _lock = self.acquire_lock(job_id)?;
+
         let path = self.journal_path(job_id);
         let lock_path = self.lock_path(job_id);
 
@@ -359,6 +408,9 @@ impl WALManager {
             })?;
             tracing::info!(job_id = %job_id, "Discarded WAL journal");
         }
+
+        // Lock is released when _lock is dropped, then we can remove the lock file
+        drop(_lock);
 
         // Clean up lock file
         if lock_path.exists() {
@@ -398,6 +450,8 @@ impl WALManager {
     }
 
     /// Clean up stale lock files (e.g., from crashed processes)
+    ///
+    /// Only removes lock files that can be successfully locked (not held by other processes).
     pub fn cleanup_stale_locks(&self) -> Result<(), WALError> {
         if !self.wal_dir.exists() {
             return Ok(());
@@ -411,7 +465,23 @@ impl WALManager {
         for entry in entries.flatten() {
             let name = entry.file_name().to_string_lossy().to_string();
             if name.ends_with(".wal.lock") {
-                let _ = fs::remove_file(entry.path());
+                let lock_path = entry.path();
+
+                // Try to acquire lock before deleting
+                // If we can't lock it, another process is using it
+                if let Ok(lock_file) = OpenOptions::new()
+                    .write(true)
+                    .open(&lock_path)
+                {
+                    // Try non-blocking lock
+                    if lock_file.try_lock_exclusive().is_ok() {
+                        // We got the lock, so no one is using it - safe to delete
+                        drop(lock_file);
+                        let _ = fs::remove_file(&lock_path);
+                        tracing::debug!(path = %lock_path.display(), "Cleaned up stale lock file");
+                    }
+                    // If try_lock fails, another process has the lock - leave it alone
+                }
             }
         }
 

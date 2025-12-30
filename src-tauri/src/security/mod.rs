@@ -5,7 +5,9 @@ pub mod regex_validator;
 use regex::Regex;
 use std::path::{Component, Path, PathBuf};
 
+#[allow(unused_imports)]
 pub use command_sandbox::{AllowedCommand, CommandSandbox, CommandSandboxError};
+#[allow(unused_imports)]
 pub use regex_validator::{safe_regex, validate_regex_complexity, RegexValidationError};
 
 /// Security validator for path operations
@@ -167,6 +169,7 @@ impl PathValidator {
     /// # Returns
     /// * `Ok(PathBuf)` - The validated path (canonicalized where possible)
     /// * `Err(String)` - Error message if validation fails
+    #[allow(dead_code)]
     pub fn validate_for_write(path: &Path, boundary: Option<&Path>) -> Result<PathBuf, String> {
         // For writes, parent must exist even if file doesn't yet
         let parent = path
@@ -238,18 +241,25 @@ impl PathValidator {
         // Normalize the path to resolve .. without requiring existence
         let normalized = Self::normalize_path(&dest_path)?;
 
-        // Get the canonical root (must exist)
-        let root_canonical = root
+        // For containment check, we need consistent path representations.
+        // Use canonical root if available (resolves symlinks like /var -> /private/var on macOS).
+        // Then also canonicalize the normalized path if it exists, otherwise use normalized.
+        let root_for_check = root
             .canonicalize()
-            .map_err(|_| format!("Root path invalid: {}", root.display()))?;
+            .unwrap_or_else(|_| Self::normalize_path(root).unwrap_or_else(|_| root.to_path_buf()));
+
+        // For the destination, try to canonicalize the existing portion.
+        // If the full path doesn't exist, try to canonicalize the existing parent chain
+        // and append the remaining components.
+        let normalized_for_check = Self::canonicalize_existing_prefix(&normalized)
+            .unwrap_or_else(|| normalized.clone());
 
         // Check the normalized path doesn't escape root
-        // We need to compare the normalized path against root
-        if !normalized.starts_with(&root_canonical) {
+        if !normalized_for_check.starts_with(&root_for_check) {
             return Err(format!(
                 "Destination escapes root directory: {} is not under {}",
                 normalized.display(),
-                root_canonical.display()
+                root_for_check.display()
             ));
         }
 
@@ -262,6 +272,43 @@ impl PathValidator {
         }
 
         Ok(normalized)
+    }
+
+    /// Canonicalize as much of a path as exists.
+    ///
+    /// For paths where only a prefix exists (e.g., `/existing/parent/new_folder`),
+    /// this canonicalizes `/existing/parent` and appends `new_folder`.
+    fn canonicalize_existing_prefix(path: &Path) -> Option<PathBuf> {
+        // Try full canonicalization first
+        if let Ok(canonical) = path.canonicalize() {
+            return Some(canonical);
+        }
+
+        // Walk up to find existing ancestor
+        let mut existing = path.to_path_buf();
+        let mut suffix_components: Vec<_> = Vec::new();
+
+        while !existing.exists() {
+            if let Some(file_name) = existing.file_name() {
+                suffix_components.push(file_name.to_os_string());
+            }
+            if !existing.pop() {
+                break;
+            }
+        }
+
+        // If we found an existing ancestor, canonicalize it and rebuild
+        if existing.exists() {
+            if let Ok(canonical_base) = existing.canonicalize() {
+                let mut result = canonical_base;
+                for component in suffix_components.into_iter().rev() {
+                    result.push(component);
+                }
+                return Some(result);
+            }
+        }
+
+        None
     }
 
     /// Normalize a path by resolving . and .. components without requiring
@@ -320,6 +367,7 @@ impl PathValidator {
     /// # Returns
     /// * `Ok(())` if not a symlink
     /// * `Err(String)` if it is a symlink
+    #[allow(dead_code)]
     pub fn ensure_not_symlink(path: &Path, operation: &str) -> Result<(), String> {
         if Self::is_symlink(path) {
             return Err(format!(

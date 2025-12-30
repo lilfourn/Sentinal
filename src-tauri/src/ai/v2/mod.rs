@@ -34,8 +34,13 @@ pub mod agent_loop;
 
 // Public exports
 pub use agent_loop::{run_v2_agentic_organize, ExpandableDetail};
+#[allow(unused_imports)]
 pub use analytics::{ContentPreview, DigestGenerator, FolderDigest, SemanticTag};
+#[allow(unused_imports)]
 pub use architect::{Blueprint, BlueprintFolder};
+#[allow(unused_imports)]
 pub use builder::{BatchMatchResult, MatchResult};
+#[allow(unused_imports)]
 pub use local_vector_index::{LocalVectorConfig, LocalVectorIndex};
+#[allow(unused_imports)]
 pub use rate_limiter::{RateLimitManager, RateLimitState};

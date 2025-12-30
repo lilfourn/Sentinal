@@ -1367,8 +1367,6 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::fs;
-    use tempfile::tempdir;
 
     // Note: Full integration tests require API key and network access
     // These tests verify the module structure and basic functionality

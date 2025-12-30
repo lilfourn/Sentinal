@@ -5,7 +5,7 @@
 //! executed, preventing arbitrary command injection attacks.
 
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
+use std::process::Command;
 
 use super::PathValidator;
 
@@ -95,6 +95,7 @@ pub struct CommandSandbox {
 
 /// Error type for command sandbox operations
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct CommandSandboxError {
     pub message: String,
     pub kind: CommandSandboxErrorKind,

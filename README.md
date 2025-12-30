@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="public/sentinal-logo.png" alt="Sentinel Logo" width="120" />
+  <img src="public/sentinal-logo.svg" alt="Sentinel Logo" width="120" />
 </p>
 
 <h1 align="center">Sentinel</h1>
@@ -63,33 +63,15 @@ Search files by meaning, not just keywords. "tax documents" finds `1040.pdf`, `w
 ## How It Works
 
 ```mermaid
-sequenceDiagram
-    participant U as User
-    participant F as Frontend
-    participant A as AI Agent
-    participant V as VFS
-    participant W as WAL
-    participant D as Disk
+flowchart LR
+    A[User Request] --> B[AI Planning]
+    B --> C[Preview]
+    C --> D[Execute]
 
-    U->>F: "Organize by project type"
-    F->>A: Start organization
-
-    loop Until 95% coverage
-        A->>A: Sample files
-        A->>A: Generate rules
-        A->>A: Match files to destinations
-    end
-
-    A->>V: Simulate plan
-    V->>F: Preview changes
-    F->>U: Show ghost overlay
-
-    U->>F: Accept plan
-    F->>W: Journal operations
-    W->>D: Execute with recovery
-    D->>F: Progress updates
-    F->>U: Complete
+    B -- "sample → rules → match" --> B
 ```
+
+The flow is simple: describe what you want → AI builds a plan → preview changes → execute safely.
 
 ### Organization Pipeline
 
@@ -111,46 +93,24 @@ sequenceDiagram
 ## Architecture
 
 ```mermaid
-flowchart TB
-    subgraph Frontend["Frontend (React 19)"]
-        Chat[Chat Panel]
-        Changes[Changes Panel]
-        Views[File Views]
-        Stores[(Zustand Stores)]
+flowchart LR
+    subgraph Frontend
+        UI[React + Zustand]
     end
 
-    subgraph Backend["Backend (Rust)"]
-        Commands[Tauri Commands]
-
-        subgraph AI["AI Module"]
-            ChatAgent[Chat Agent<br/>ReAct Loop]
-            OrgAgent[Organize Agent<br/>Map-Reduce]
-            Rules[Rule Engine<br/>DSL Parser]
-        end
-
-        subgraph Infra["Infrastructure"]
-            VFS[Virtual FS<br/>Simulation]
-            WAL[Write-Ahead Log<br/>Recovery]
-            DAG[Execution DAG<br/>Parallel Ops]
-            Vector[Vector Index<br/>Embeddings]
-        end
+    subgraph Backend
+        AI[AI Agents]
+        VFS[Virtual FS]
+        WAL[Recovery Log]
     end
 
-    subgraph External["External"]
-        Claude[Claude API]
+    subgraph External
+        LLM[Claude API]
     end
 
-    Chat --> Commands
-    Changes --> Commands
-    Commands --> ChatAgent
-    Commands --> OrgAgent
-    ChatAgent --> Claude
-    OrgAgent --> Claude
-    OrgAgent --> Rules
-    Rules --> VFS
-    VFS --> WAL
-    WAL --> DAG
-    ChatAgent --> Vector
+    UI <--> AI
+    AI <--> LLM
+    AI --> VFS --> WAL --> Disk[(Filesystem)]
 ```
 
 ### System Components
@@ -183,44 +143,24 @@ After (50 tokens):
 
 ```mermaid
 flowchart LR
-    A[Extract skeleton<br/>IMG_{NUM}.jpg] --> B[Cluster by pattern]
-    B --> C{≥3 files?}
-    C -->|Yes| D[Fold to range<br/>IMG_[0001..5000].jpg]
-    C -->|No| E[Keep as outlier]
-    D --> F[Generate regex<br/>for validation]
+    A[5000 files] --> B{Pattern?}
+    B -->|Yes| C[Fold to range]
+    B -->|No| D[Keep as-is]
 ```
 
 ### DAG-Based Parallel Execution
 
-Operations form a dependency graph. Creating `/Projects/` must complete before moving files into it, but all file moves at the same level execute in parallel.
+Operations form a dependency graph. Folders must exist before files move into them, but independent operations run in parallel.
 
 ```mermaid
 flowchart TB
-    subgraph Level 0
-        A[Create /Projects/]
-    end
-
-    subgraph Level 1
-        B[Create /Projects/Acme/]
-        C[Create /Projects/Henderson/]
-    end
-
-    subgraph Level 2
-        D[Move invoice1.pdf]
-        E[Move invoice2.pdf]
-        F[Move contract.pdf]
-        G[Move specs.docx]
-    end
-
-    A --> B
-    A --> C
-    B --> D
-    B --> E
-    C --> F
-    C --> G
+    A[Create /Projects/] --> B[Create /Acme/]
+    A --> C[Create /Henderson/]
+    B --> D[Move files ×2]
+    C --> E[Move files ×2]
 ```
 
-Level 0 executes first. Level 1 operations run in parallel after Level 0 completes. Level 2 operations (4 file moves) execute simultaneously.
+**Level 0:** Create root → **Level 1:** Create subfolders (parallel) → **Level 2:** Move all files (parallel)
 
 ### Coverage-Based Iteration
 

@@ -47,6 +47,7 @@ pub struct HydratedContext {
 }
 
 /// Image context for multimodal
+#[allow(dead_code)]
 pub struct ImageContext {
     pub name: String,
     pub base64: String,

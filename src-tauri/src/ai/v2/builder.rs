@@ -14,10 +14,8 @@ use crate::ai::credentials::CredentialManager;
 use crate::ai::rules::VirtualFile;
 
 use super::agent_loop::ExpandableDetail;
-use super::architect::{Blueprint, BlueprintFolder};
+use super::architect::Blueprint;
 use super::local_vector_index::LocalVectorIndex;
-use super::vfs::ShadowVFS;
-
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use std::time::Duration;

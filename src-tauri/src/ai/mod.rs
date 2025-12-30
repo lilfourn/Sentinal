@@ -8,6 +8,7 @@ pub mod rules;
 pub mod tools;
 pub mod v2;
 
+#[allow(unused_imports)]
 pub use chat::*;
 pub use client::*;
 pub use credentials::*;

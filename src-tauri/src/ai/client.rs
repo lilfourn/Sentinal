@@ -63,6 +63,7 @@ impl MessageContent {
 
     /// Create a text content block with ephemeral caching
     /// Use this for large, repeated context like file trees
+    #[allow(dead_code)]
     pub fn text_cached(text: &str) -> Self {
         Self {
             content_type: "text".to_string(),
