@@ -4,6 +4,9 @@ pub mod jobs;
 pub mod permissions;
 pub mod photos;
 pub mod thumbnails;
+pub mod vector;
+pub mod vfs;
+pub mod wal;
 pub mod watcher;
 
 pub use ai::*;
@@ -12,4 +15,7 @@ pub use jobs::*;
 pub use permissions::*;
 pub use photos::*;
 pub use thumbnails::*;
+pub use vector::*;
+pub use vfs::*;
+pub use wal::*;
 pub use watcher::*;

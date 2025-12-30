@@ -77,3 +77,23 @@ sha2 = "0.10"
 resvg = "0.44"
 tauri-plugin-macos-permissions = "2.3.0"
 
+# === V2 Dependencies ===
+# Parallel directory scanning
+jwalk = "0.8"
+
+# Local embeddings for semantic search (no API key needed)
+fastembed = "4"
+
+# DAG for parallel execution
+petgraph = "0.6"
+
+# Async traits
+async-trait = "0.1"
+
+# Number of CPUs for parallelism
+num_cpus = "1.16"
+
+[dev-dependencies]
+# Temporary directories for tests
+tempfile = "3"
+

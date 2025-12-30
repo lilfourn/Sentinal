@@ -6,6 +6,7 @@ import { FileRow } from './FileRow';
 import { NewItemRow } from './NewItemRow';
 import { SelectionOverlay } from './SelectionOverlay';
 import { ContextMenu, buildFileContextMenuItems, buildBackgroundContextMenuItems, type ContextMenuPosition } from '../ContextMenu/ContextMenu';
+import { useDragDropContext } from '../drag-drop';
 import { useNavigationStore } from '../../stores/navigation-store';
 import { useSelectionStore } from '../../stores/selection-store';
 import { useOrganizeStore } from '../../stores/organize-store';
@@ -44,6 +45,13 @@ export function FileListView({ entries }: FileListViewProps) {
     stopCreating,
   } = useSelectionStore();
   const { startOrganize } = useOrganizeStore();
+  const {
+    dropTarget,
+    startDrag,
+    setDropTarget,
+    executeDrop,
+    isDragging: isDragDropActive,
+  } = useDragDropContext();
 
   // Check if we should show the new item row in this directory
   const isCreatingHere = creatingType !== null && creatingInPath === currentPath;
@@ -299,6 +307,47 @@ export function FileListView({ entries }: FileListViewProps) {
     }
   }, []);
 
+  // Handle drag start on an item
+  const handleDragStart = useCallback(
+    (entry: FileEntry) => {
+      // Get all selected items, or just this one if not selected
+      const itemsToDrag = selectedPaths.has(entry.path)
+        ? entries.filter((e) => selectedPaths.has(e.path))
+        : [entry];
+
+      startDrag(itemsToDrag, currentPath);
+    },
+    [selectedPaths, entries, currentPath, startDrag]
+  );
+
+  // Handle drag entering a directory (for drop target highlighting)
+  const handleDragEnter = useCallback(
+    (entry: FileEntry) => {
+      if (entry.isDirectory && isDragDropActive) {
+        setDropTarget(entry.path, true);
+      }
+    },
+    [isDragDropActive, setDropTarget]
+  );
+
+  // Handle dropping on a directory
+  const handleDrop = useCallback(
+    async (entry: FileEntry) => {
+      if (entry.isDirectory && isDragDropActive) {
+        setDropTarget(entry.path, true);
+        await executeDrop();
+      }
+    },
+    [isDragDropActive, setDropTarget, executeDrop]
+  );
+
+  // Clear drop target when mouse leaves the list area
+  const handleMouseLeave = useCallback(() => {
+    if (isDragDropActive) {
+      setDropTarget(null, false);
+    }
+  }, [isDragDropActive, setDropTarget]);
+
   // Keyboard navigation and shortcuts
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
@@ -412,6 +461,7 @@ export function FileListView({ entries }: FileListViewProps) {
       ref={parentRef}
       onClick={handleContainerClick}
       onMouseDown={handleContainerMouseDown}
+      onMouseLeave={handleMouseLeave}
       onContextMenu={handleBackgroundContextMenu}
       className="relative h-full overflow-auto focus:outline-none select-none"
       tabIndex={0}
@@ -467,6 +517,8 @@ export function FileListView({ entries }: FileListViewProps) {
               isSelected={selectedPaths.has(entry.path)}
               isFocused={focusedPath === entry.path}
               isEditing={editingPath === entry.path}
+              isDragTarget={dropTarget?.path === entry.path}
+              isValidDropTarget={dropTarget?.path === entry.path ? dropTarget.isValid : true}
               style={{
                 position: 'absolute',
                 top: 0,
@@ -480,6 +532,9 @@ export function FileListView({ entries }: FileListViewProps) {
               onContextMenu={(e) => handleContextMenu(entry, e)}
               onRenameConfirm={(newName) => handleRenameConfirm(entry.path, newName)}
               onRenameCancel={handleRenameCancel}
+              onDragStart={() => handleDragStart(entry)}
+              onDragEnter={() => handleDragEnter(entry)}
+              onDrop={() => handleDrop(entry)}
             />
           );
         })}

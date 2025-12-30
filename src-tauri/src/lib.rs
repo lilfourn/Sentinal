@@ -1,9 +1,15 @@
 mod ai;
 mod commands;
+mod execution;
 mod jobs;
 mod models;
+pub mod quarantine;
 mod security;
 mod services;
+mod tree;
+mod vector;
+pub mod vfs;
+mod wal;
 
 use commands::*;
 use services::watcher::create_watcher_handle;
@@ -11,6 +17,11 @@ use services::watcher::create_watcher_handle;
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let watcher_handle = create_watcher_handle();
+    let vector_state = VectorState::default();
+    let tree_state = TreeState::default();
+    let vfs_state = create_vfs_state();
+    let quarantine_state = create_quarantine_state()
+        .expect("Failed to create quarantine manager");
 
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
@@ -18,6 +29,10 @@ pub fn run() {
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_macos_permissions::init())
         .manage(watcher_handle)
+        .manage(vector_state)
+        .manage(tree_state)
+        .manage(vfs_state)
+        .manage(quarantine_state)
         .invoke_handler(tauri::generate_handler![
             // Filesystem commands
             read_directory,
@@ -32,6 +47,10 @@ pub fn run() {
             get_downloads_directory,
             get_user_directories,
             open_file,
+            // Drag-drop commands
+            validate_drag_drop,
+            move_files_batch,
+            copy_files_batch,
             // Watcher commands
             start_downloads_watcher,
             stop_downloads_watcher,
@@ -43,8 +62,6 @@ pub fn run() {
             get_rename_suggestion,
             apply_rename,
             undo_rename,
-            build_folder_context,
-            generate_organize_plan,
             generate_organize_plan_agentic,
             suggest_naming_conventions,
             generate_organize_plan_with_convention,
@@ -58,6 +75,7 @@ pub fn run() {
             get_current_job,
             clear_organize_job,
             resume_organize_job,
+            execute_plan_parallel,
             // Thumbnail commands
             get_thumbnail,
             clear_thumbnail_cache,
@@ -69,6 +87,52 @@ pub fn run() {
             // Photo commands
             scan_photos,
             get_photo_directories,
+            // Vector index commands
+            init_vector_index,
+            vector_search,
+            vector_get_tags,
+            vector_find_by_tag,
+            vector_find_similar,
+            vector_all_tags,
+            vector_stats,
+            clear_vector_index,
+            // Tree compression commands
+            get_tree_xml,
+            configure_tree,
+            get_tree_config,
+            // VFS commands
+            scan_folder_vfs,
+            vfs_list_dir,
+            vfs_search_content,
+            vfs_get_node,
+            vfs_get_stats,
+            vfs_simulate_plan,
+            vfs_stage_move,
+            vfs_stage_create_folder,
+            vfs_stage_delete,
+            vfs_apply_staged,
+            vfs_clear_staged,
+            vfs_has_staged,
+            vfs_clear,
+            // Quarantine commands
+            quarantine_item,
+            quarantine_restore,
+            quarantine_list,
+            quarantine_cleanup,
+            quarantine_permanent_delete,
+            quarantine_check,
+            // WAL commands
+            wal_check_recovery,
+            wal_resume_job,
+            wal_rollback_job,
+            wal_discard_job,
+            wal_get_journal,
+            wal_list_journals,
+            wal_create_journal,
+            wal_add_operation,
+            wal_execute_journal,
+            wal_execute_operations,
+            wal_get_directory,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

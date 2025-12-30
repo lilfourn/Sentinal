@@ -3,9 +3,11 @@ pub mod credentials;
 pub mod json_parser;
 pub mod naming;
 pub mod prompts;
-pub mod tool_executor;
+pub mod rules;
 pub mod tools;
+pub mod v2;
 
 pub use client::*;
 pub use credentials::*;
 pub use naming::*;
+pub use v2::*;

@@ -36,6 +36,8 @@ export function ChangesPanel() {
     suggestedConventions,
     selectConvention,
     skipConventionSelection,
+    phase,
+    analysisError,
   } = useOrganizeStore();
 
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -52,8 +54,8 @@ export function ChangesPanel() {
   const folderName = targetFolder?.split('/').pop() || 'Folder';
   const completedCount = executedOps.length;
   const totalCount = currentPlan?.operations.length || 0;
-  const isComplete = currentPhase === 'complete';
-  const hasError = currentPhase === 'error';
+  const isComplete = currentPhase === 'complete' || phase === 'complete';
+  const hasError = currentPhase === 'error' || phase === 'failed';
   const isWorking = !isComplete && !hasError;
 
   return (
@@ -134,6 +136,7 @@ export function ChangesPanel() {
         hasError={hasError}
         totalCount={totalCount}
         currentPhase={currentPhase}
+        errorDetail={analysisError}
       />
     </div>
   );
@@ -252,11 +255,13 @@ function StatusFooter({
   hasError,
   totalCount,
   currentPhase,
+  errorDetail,
 }: {
   isComplete: boolean;
   hasError: boolean;
   totalCount: number;
   currentPhase: ThoughtType;
+  errorDetail?: string | null;
 }) {
   if (isComplete) {
     const message = totalCount === 0 ? 'Already organized' : 'Complete';
@@ -282,11 +287,18 @@ function StatusFooter({
   if (hasError) {
     return (
       <div className="p-3 border-t border-white/5 bg-red-500/5">
-        <div className="flex items-center gap-2">
-          <div className="w-5 h-5 rounded-full bg-red-500/20 flex items-center justify-center">
+        <div className="flex items-start gap-2">
+          <div className="w-5 h-5 rounded-full bg-red-500/20 flex items-center justify-center flex-shrink-0 mt-0.5">
             <XCircle size={12} className="text-red-400" />
           </div>
-          <p className="text-xs font-medium text-red-400">Organization failed</p>
+          <div className="min-w-0 flex-1">
+            <p className="text-xs font-medium text-red-400">Organization failed</p>
+            {errorDetail && (
+              <p className="text-[10px] text-red-400/70 mt-1 line-clamp-3 break-words">
+                {errorDetail}
+              </p>
+            )}
+          </div>
         </div>
       </div>
     );

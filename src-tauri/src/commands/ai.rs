@@ -1,5 +1,6 @@
-use crate::ai::{AnthropicClient, CredentialManager};
+use crate::ai::{run_v2_agentic_organize, AnthropicClient, CredentialManager};
 use crate::jobs::OrganizePlan;
+use std::path::Path;
 
 /// Rename suggestion response
 #[derive(serde::Serialize)]
@@ -163,66 +164,8 @@ pub async fn undo_rename(
     Ok(())
 }
 
-/// Folder context for AI organization
-#[derive(serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct FolderContext {
-    pub path: String,
-    pub ls_output: String,
-    pub analysis: Option<String>,
-}
-
-/// Build folder context (uses Claude Haiku for speed)
-#[tauri::command]
-pub async fn build_folder_context(folder_path: String) -> Result<FolderContext, String> {
-    let path = std::path::Path::new(&folder_path);
-
-    if !path.exists() || !path.is_dir() {
-        return Err(format!("Invalid folder path: {}", folder_path));
-    }
-
-    // Build ls -R style output
-    let mut ls_output = String::new();
-    build_ls_output(path, path, &mut ls_output, 0)?;
-
-    // Get AI analysis using Haiku (fast)
-    let client = AnthropicClient::new();
-    let analysis = match client.analyze_folder_context(&folder_path, &ls_output).await {
-        Ok(a) => Some(a),
-        Err(e) => {
-            eprintln!("Failed to analyze context: {}", e);
-            None
-        }
-    };
-
-    Ok(FolderContext {
-        path: folder_path,
-        ls_output,
-        analysis,
-    })
-}
-
-/// Generate organization plan (uses Claude Sonnet)
-/// DEPRECATED: Use generate_organize_plan_agentic instead
-#[tauri::command]
-pub async fn generate_organize_plan(
-    context: FolderContext,
-    user_request: String,
-) -> Result<String, String> {
-    let client = AnthropicClient::new();
-
-    client
-        .generate_organize_plan(
-            &context.path,
-            &context.ls_output,
-            &user_request,
-            context.analysis.as_deref(),
-        )
-        .await
-}
-
 /// Agentic organize command - explores folder and generates typed plan
-/// Uses Claude tool-use to explore before generating the plan
+/// Uses Claude tool-use with V2 semantic tools and Shadow VFS
 #[tauri::command]
 pub async fn generate_organize_plan_agentic(
     folder_path: String,
@@ -230,8 +173,6 @@ pub async fn generate_organize_plan_agentic(
     app_handle: tauri::AppHandle,
 ) -> Result<OrganizePlan, String> {
     use tauri::Emitter;
-
-    let client = AnthropicClient::new();
 
     let emit = |thought_type: &str, content: &str| {
         let _ = app_handle.emit(
@@ -243,9 +184,7 @@ pub async fn generate_organize_plan_agentic(
         );
     };
 
-    client
-        .run_agentic_organize(&folder_path, &user_request, emit)
-        .await
+    run_v2_agentic_organize(Path::new(&folder_path), &user_request, emit).await
 }
 
 /// Suggest naming conventions for a folder
@@ -315,8 +254,6 @@ pub async fn generate_organize_plan_with_convention(
 ) -> Result<crate::jobs::OrganizePlan, String> {
     use tauri::Emitter;
 
-    let client = AnthropicClient::new();
-
     let emit = |thought_type: &str, content: &str| {
         let _ = app_handle.emit(
             "ai-thought",
@@ -337,58 +274,5 @@ pub async fn generate_organize_plan_with_convention(
         user_request
     };
 
-    client
-        .run_agentic_organize(&folder_path, &full_request, emit)
-        .await
-}
-
-/// Helper to build ls -R style output
-fn build_ls_output(
-    root: &std::path::Path,
-    current: &std::path::Path,
-    output: &mut String,
-    depth: usize,
-) -> Result<(), String> {
-    if depth > 5 {
-        return Ok(()); // Limit depth
-    }
-
-    let relative = current
-        .strip_prefix(root)
-        .unwrap_or(current)
-        .to_string_lossy();
-
-    if depth > 0 {
-        output.push_str(&format!("\n{}:\n", relative));
-    } else {
-        output.push_str("./:\n");
-    }
-
-    let entries: Vec<_> = std::fs::read_dir(current)
-        .map_err(|e| format!("Failed to read directory: {}", e))?
-        .filter_map(|e| e.ok())
-        .collect();
-
-    for entry in &entries {
-        let name = entry.file_name().to_string_lossy().to_string();
-        let file_type = entry.file_type().map_err(|e| e.to_string())?;
-
-        if file_type.is_dir() {
-            output.push_str(&format!("{}/\n", name));
-        } else {
-            output.push_str(&format!("{}\n", name));
-        }
-    }
-
-    // Recurse into subdirectories
-    for entry in entries {
-        if entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
-            let name = entry.file_name().to_string_lossy().to_string();
-            if !name.starts_with('.') {
-                build_ls_output(root, &entry.path(), output, depth + 1)?;
-            }
-        }
-    }
-
-    Ok(())
+    run_v2_agentic_organize(Path::new(&folder_path), &full_request, emit).await
 }

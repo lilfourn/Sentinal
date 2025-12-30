@@ -1,4 +1,5 @@
 use crate::models::{DirectoryContents, FileEntry, FileMetadata};
+use crate::security::cycle_detection::{self, CycleError};
 use crate::security::PathValidator;
 use std::path::Path;
 
@@ -15,6 +16,56 @@ pub struct DirectoryError {
 impl From<DirectoryError> for String {
     fn from(err: DirectoryError) -> Self {
         err.message
+    }
+}
+
+/// Structured error for drag-drop operations
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(tag = "type", rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum DragDropError {
+    /// Cannot drop directory into itself
+    CycleDetectedSelf { path: String },
+    /// Cannot drop directory into its own descendant
+    CycleDetectedDescendant { source: String, target: String },
+    /// Cannot drop item into another selected item (multi-drag)
+    TargetIsSelected { target: String },
+    /// File/folder already exists at destination
+    NameCollision { name: String, destination: String },
+    /// Permission denied
+    #[allow(dead_code)]
+    PermissionDenied { path: String, message: String },
+    /// Source does not exist
+    SourceNotFound { path: String },
+    /// Target is not a directory
+    TargetNotDirectory { path: String },
+    /// Protected path
+    ProtectedPath { path: String },
+    /// Generic IO error
+    IoError { message: String },
+}
+
+impl From<CycleError> for DragDropError {
+    fn from(err: CycleError) -> Self {
+        match err {
+            CycleError::SameDirectory(p) => DragDropError::CycleDetectedSelf {
+                path: p.to_string_lossy().to_string(),
+            },
+            CycleError::TargetIsDescendant { source, target } => {
+                DragDropError::CycleDetectedDescendant {
+                    source: source.to_string_lossy().to_string(),
+                    target: target.to_string_lossy().to_string(),
+                }
+            }
+            CycleError::TargetIsSource(p) => DragDropError::TargetIsSelected {
+                target: p.to_string_lossy().to_string(),
+            },
+            CycleError::SourceNotFound(p) => DragDropError::SourceNotFound {
+                path: p.to_string_lossy().to_string(),
+            },
+            CycleError::TargetNotFound(p) => DragDropError::SourceNotFound {
+                path: p.to_string_lossy().to_string(),
+            },
+        }
     }
 }
 
@@ -377,6 +428,151 @@ pub async fn open_file(path: String) -> Result<(), String> {
 
     tauri_plugin_opener::open_path(path.to_str().unwrap_or_default(), None::<&str>)
         .map_err(|e| format!("Failed to open file: {}", e))
+}
+
+/// Validate a drag-drop operation without executing it.
+/// Returns Ok(()) if valid, or specific DragDropError if invalid.
+#[tauri::command]
+pub async fn validate_drag_drop(
+    sources: Vec<String>,
+    target: String,
+) -> Result<(), DragDropError> {
+    let target_path = Path::new(&target);
+
+    // Target must exist
+    if !target_path.exists() {
+        return Err(DragDropError::SourceNotFound {
+            path: target.clone(),
+        });
+    }
+
+    // Target must be a directory
+    if !target_path.is_dir() {
+        return Err(DragDropError::TargetNotDirectory {
+            path: target.clone(),
+        });
+    }
+
+    // Convert to Path references
+    let source_paths: Vec<std::path::PathBuf> =
+        sources.iter().map(|s| std::path::PathBuf::from(s)).collect();
+    let source_refs: Vec<&Path> = source_paths.iter().map(|p| p.as_path()).collect();
+
+    // Check for cycles
+    cycle_detection::validate_multi_drop(&source_refs, target_path)?;
+
+    // Check each source
+    for source_path in &source_paths {
+        // Source must exist
+        if !source_path.exists() {
+            return Err(DragDropError::SourceNotFound {
+                path: source_path.to_string_lossy().to_string(),
+            });
+        }
+
+        // Source cannot be a protected path
+        if PathValidator::is_protected_path(source_path) {
+            return Err(DragDropError::ProtectedPath {
+                path: source_path.to_string_lossy().to_string(),
+            });
+        }
+
+        // Check for name collision at destination
+        if let Some(name) = source_path.file_name() {
+            let destination = target_path.join(name);
+            if destination.exists() {
+                return Err(DragDropError::NameCollision {
+                    name: name.to_string_lossy().to_string(),
+                    destination: target.clone(),
+                });
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Execute multiple move operations (batch move for drag-drop).
+/// Returns the new paths of the moved items.
+#[tauri::command]
+pub async fn move_files_batch(
+    sources: Vec<String>,
+    target_directory: String,
+) -> Result<Vec<String>, DragDropError> {
+    // Validate first
+    validate_drag_drop(sources.clone(), target_directory.clone()).await?;
+
+    let target_path = Path::new(&target_directory);
+    let mut new_paths = Vec::new();
+
+    for source in &sources {
+        let src_path = Path::new(source);
+        let file_name = src_path.file_name().ok_or_else(|| DragDropError::IoError {
+            message: format!("Invalid source path: {}", source),
+        })?;
+
+        let dst_path = target_path.join(file_name);
+
+        // Try rename first (same filesystem), fall back to copy+delete
+        if std::fs::rename(src_path, &dst_path).is_err() {
+            if src_path.is_dir() {
+                copy_dir_all(src_path, &dst_path).map_err(|e| DragDropError::IoError {
+                    message: e,
+                })?;
+                std::fs::remove_dir_all(src_path).map_err(|e| DragDropError::IoError {
+                    message: format!("Failed to remove source directory: {}", e),
+                })?;
+            } else {
+                std::fs::copy(src_path, &dst_path).map_err(|e| DragDropError::IoError {
+                    message: format!("Failed to copy file: {}", e),
+                })?;
+                std::fs::remove_file(src_path).map_err(|e| DragDropError::IoError {
+                    message: format!("Failed to remove source file: {}", e),
+                })?;
+            }
+        }
+
+        new_paths.push(dst_path.to_string_lossy().to_string());
+    }
+
+    Ok(new_paths)
+}
+
+/// Execute multiple copy operations (batch copy for drag-drop with Option key).
+/// Returns the new paths of the copied items.
+#[tauri::command]
+pub async fn copy_files_batch(
+    sources: Vec<String>,
+    target_directory: String,
+) -> Result<Vec<String>, DragDropError> {
+    // Validate first (same validation as move)
+    validate_drag_drop(sources.clone(), target_directory.clone()).await?;
+
+    let target_path = Path::new(&target_directory);
+    let mut new_paths = Vec::new();
+
+    for source in &sources {
+        let src_path = Path::new(source);
+        let file_name = src_path.file_name().ok_or_else(|| DragDropError::IoError {
+            message: format!("Invalid source path: {}", source),
+        })?;
+
+        let dst_path = target_path.join(file_name);
+
+        if src_path.is_dir() {
+            copy_dir_all(src_path, &dst_path).map_err(|e| DragDropError::IoError {
+                message: e,
+            })?;
+        } else {
+            std::fs::copy(src_path, &dst_path).map_err(|e| DragDropError::IoError {
+                message: format!("Failed to copy file: {}", e),
+            })?;
+        }
+
+        new_paths.push(dst_path.to_string_lossy().to_string());
+    }
+
+    Ok(new_paths)
 }
 
 /// Helper function to copy a directory recursively

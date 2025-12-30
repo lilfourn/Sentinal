@@ -13,9 +13,11 @@ import {
   type LucideIcon,
 } from 'lucide-react';
 import { ContextMenu, buildFileContextMenuItems, buildBackgroundContextMenuItems, type ContextMenuPosition } from '../ContextMenu/ContextMenu';
+import { useDragDropContext } from '../drag-drop';
 import { FolderIcon } from '../icons/FolderIcon';
 import { SelectionOverlay } from './SelectionOverlay';
 import { InlineNameEditor } from './InlineNameEditor';
+import { GhostOverlay, getGhostClasses } from '../ghost';
 import { useNavigationStore } from '../../stores/navigation-store';
 import { useSelectionStore } from '../../stores/selection-store';
 import { useOrganizeStore } from '../../stores/organize-store';
@@ -24,6 +26,8 @@ import { useThumbnail } from '../../hooks/useThumbnail';
 import { useMarqueeSelection } from '../../hooks/useMarqueeSelection';
 import { cn, getFileType, isThumbnailSupported, openFile } from '../../lib/utils';
 import type { FileEntry } from '../../types/file';
+import type { GhostState } from '../../types/ghost';
+import '../ghost/GhostAnimations.css';
 
 interface FileGridViewProps {
   entries: FileEntry[];
@@ -52,22 +56,36 @@ interface FileGridItemProps {
   entry: FileEntry;
   isSelected: boolean;
   isEditing?: boolean;
+  isDragTarget?: boolean;
+  isValidDropTarget?: boolean;
+  ghostState?: GhostState;
+  linkedPath?: string;
   onClick: (e: React.MouseEvent) => void;
   onDoubleClick: () => void;
   onContextMenu: (e: React.MouseEvent) => void;
   onRenameConfirm?: (newName: string) => void;
   onRenameCancel?: () => void;
+  onDragStart?: (e: React.MouseEvent) => void;
+  onDragEnter?: () => void;
+  onDrop?: () => void;
 }
 
 function FileGridItem({
   entry,
   isSelected,
   isEditing = false,
+  isDragTarget = false,
+  isValidDropTarget = true,
+  ghostState = 'normal',
+  linkedPath,
   onClick,
   onDoubleClick,
   onContextMenu,
   onRenameConfirm,
   onRenameCancel,
+  onDragStart,
+  onDragEnter,
+  onDrop,
 }: FileGridItemProps) {
   const Icon = getFileIcon(entry);
   const supportsThumbnail = !entry.isDirectory && isThumbnailSupported(entry.extension);
@@ -76,18 +94,65 @@ function FileGridItem({
     entry.extension,
     96
   );
+  const ghostClasses = getGhostClasses(ghostState);
+
+  // Handle mouse down for drag initiation
+  const handleMouseDown = (e: React.MouseEvent) => {
+    if (e.button !== 0 || isEditing) return;
+
+    const startX = e.clientX;
+    const startY = e.clientY;
+    const threshold = 5;
+
+    const handleMouseMove = (moveEvent: MouseEvent) => {
+      const deltaX = Math.abs(moveEvent.clientX - startX);
+      const deltaY = Math.abs(moveEvent.clientY - startY);
+
+      if (deltaX > threshold || deltaY > threshold) {
+        document.removeEventListener('mousemove', handleMouseMove);
+        document.removeEventListener('mouseup', handleMouseUp);
+        onDragStart?.(e);
+      }
+    };
+
+    const handleMouseUp = () => {
+      document.removeEventListener('mousemove', handleMouseMove);
+      document.removeEventListener('mouseup', handleMouseUp);
+    };
+
+    document.addEventListener('mousemove', handleMouseMove);
+    document.addEventListener('mouseup', handleMouseUp);
+  };
+
+  const handleMouseEnter = () => {
+    if (onDragEnter && entry.isDirectory) {
+      onDragEnter();
+    }
+  };
+
+  const handleMouseUp = () => {
+    if (onDrop && entry.isDirectory) {
+      onDrop();
+    }
+  };
 
   return (
     <div
       data-path={entry.path}
+      onMouseDown={handleMouseDown}
+      onMouseEnter={handleMouseEnter}
+      onMouseUp={handleMouseUp}
       onClick={isEditing ? undefined : onClick}
       onDoubleClick={isEditing ? undefined : onDoubleClick}
       onContextMenu={isEditing ? undefined : onContextMenu}
       className={cn(
-        'flex flex-col items-center p-2 rounded-lg cursor-default select-none',
+        'group relative flex flex-col items-center p-2 rounded-lg cursor-default select-none',
         'transition-colors duration-75',
         isSelected && 'bg-orange-500/20',
-        !isSelected && !isEditing && 'hover:bg-gray-500/10'
+        !isSelected && !isEditing && !isDragTarget && ghostState === 'normal' && 'hover:bg-gray-500/10',
+        isDragTarget && isValidDropTarget && 'ring-2 ring-orange-500 bg-orange-500/10',
+        isDragTarget && !isValidDropTarget && 'ring-2 ring-red-500 bg-red-500/10',
+        ghostClasses
       )}
     >
       {/* Icon/Thumbnail area */}
@@ -127,6 +192,11 @@ function FileGridItem({
         >
           {entry.name}
         </span>
+      )}
+
+      {/* Ghost overlay for state indicators */}
+      {ghostState !== 'normal' && (
+        <GhostOverlay ghostState={ghostState} linkedPath={linkedPath} />
       )}
     </div>
   );
@@ -191,6 +261,13 @@ export function FileGridView({ entries }: FileGridViewProps) {
     stopCreating,
   } = useSelectionStore();
   const { startOrganize } = useOrganizeStore();
+  const {
+    dropTarget,
+    startDrag: startFileDrag,
+    setDropTarget,
+    executeDrop,
+    isDragging: isDragDropActive,
+  } = useDragDropContext();
 
   // Check if we should show the new item in this directory
   const isCreatingHere = creatingType !== null && creatingInPath === currentPath;
@@ -375,6 +452,46 @@ export function FileGridView({ entries }: FileGridViewProps) {
     }
   }, [refreshDirectory]);
 
+  // Handle drag start on an item
+  const handleDragStart = useCallback(
+    (entry: FileEntry) => {
+      const itemsToDrag = selectedPaths.has(entry.path)
+        ? entries.filter((e) => selectedPaths.has(e.path))
+        : [entry];
+
+      startFileDrag(itemsToDrag, currentPath);
+    },
+    [selectedPaths, entries, currentPath, startFileDrag]
+  );
+
+  // Handle drag entering a directory
+  const handleDragEnter = useCallback(
+    (entry: FileEntry) => {
+      if (entry.isDirectory && isDragDropActive) {
+        setDropTarget(entry.path, true);
+      }
+    },
+    [isDragDropActive, setDropTarget]
+  );
+
+  // Handle dropping on a directory
+  const handleDrop = useCallback(
+    async (entry: FileEntry) => {
+      if (entry.isDirectory && isDragDropActive) {
+        setDropTarget(entry.path, true);
+        await executeDrop();
+      }
+    },
+    [isDragDropActive, setDropTarget, executeDrop]
+  );
+
+  // Clear drop target when mouse leaves
+  const handleMouseLeave = useCallback(() => {
+    if (isDragDropActive) {
+      setDropTarget(null, false);
+    }
+  }, [isDragDropActive, setDropTarget]);
+
   // Keyboard navigation and shortcuts
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
@@ -454,6 +571,7 @@ export function FileGridView({ entries }: FileGridViewProps) {
       ref={containerRef}
       onClick={handleContainerClick}
       onMouseDown={handleContainerMouseDown}
+      onMouseLeave={handleMouseLeave}
       onContextMenu={handleBackgroundContextMenu}
       className="relative h-full overflow-auto p-4 focus:outline-none select-none"
       tabIndex={0}
@@ -478,11 +596,16 @@ export function FileGridView({ entries }: FileGridViewProps) {
             entry={entry}
             isSelected={selectedPaths.has(entry.path)}
             isEditing={editingPath === entry.path}
+            isDragTarget={dropTarget?.path === entry.path}
+            isValidDropTarget={dropTarget?.path === entry.path ? dropTarget.isValid : true}
             onClick={(e) => handleClick(entry, e)}
             onDoubleClick={() => handleDoubleClick(entry)}
             onContextMenu={(e) => handleContextMenu(entry, e)}
             onRenameConfirm={(newName) => handleRenameConfirm(entry.path, newName)}
             onRenameCancel={handleRenameCancel}
+            onDragStart={() => handleDragStart(entry)}
+            onDragEnter={() => handleDragEnter(entry)}
+            onDrop={() => handleDrop(entry)}
           />
         ))}
       </div>

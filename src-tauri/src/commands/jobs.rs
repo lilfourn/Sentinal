@@ -1,4 +1,8 @@
+use crate::execution::{ExecutionEngine, ExecutionResult};
 use crate::jobs::{JobManager, JobStatus, OrganizeJob, OrganizeOperation, OrganizePlan};
+use crate::wal::entry::{WALJournal, WALOperationType};
+use crate::wal::journal::WALManager;
+use std::path::PathBuf;
 
 /// Start a new organize job
 #[tauri::command]
@@ -135,4 +139,131 @@ pub fn resume_organize_job(job_id: String) -> Result<OrganizeJob, String> {
     JobManager::save_job(&job)?;
 
     Ok(job)
+}
+
+/// Execute an organize plan using parallel DAG-based execution
+///
+/// This command:
+/// 1. Converts the OrganizePlan to WAL entries
+/// 2. Builds a dependency DAG for parallel execution
+/// 3. Executes operations in parallel within each level
+/// 4. Returns the execution result
+#[tauri::command]
+pub async fn execute_plan_parallel(plan: OrganizePlan) -> Result<ExecutionResult, String> {
+    eprintln!(
+        "[ExecutePlan] Starting parallel execution of {} operations",
+        plan.operations.len()
+    );
+
+    // Create a WAL journal from the plan
+    let target_folder = PathBuf::from(&plan.target_folder);
+    let mut journal = WALJournal::new(plan.plan_id.clone(), target_folder.clone());
+
+    // Track folder creation operations for dependencies
+    let mut folder_op_ids: std::collections::HashMap<String, uuid::Uuid> =
+        std::collections::HashMap::new();
+
+    // Convert operations to WAL entries with dependencies
+    for op in &plan.operations {
+        let wal_op = match op.op_type.as_str() {
+            "create_folder" => {
+                if let Some(ref path) = op.path {
+                    WALOperationType::CreateFolder {
+                        path: PathBuf::from(path),
+                    }
+                } else {
+                    continue;
+                }
+            }
+            "move" => {
+                if let (Some(ref src), Some(ref dst)) = (&op.source, &op.destination) {
+                    WALOperationType::Move {
+                        source: PathBuf::from(src),
+                        destination: PathBuf::from(dst),
+                    }
+                } else {
+                    continue;
+                }
+            }
+            "rename" => {
+                if let (Some(ref path), Some(ref new_name)) = (&op.path, &op.new_name) {
+                    WALOperationType::Rename {
+                        path: PathBuf::from(path),
+                        new_name: new_name.clone(),
+                    }
+                } else {
+                    continue;
+                }
+            }
+            "trash" | "quarantine" => {
+                if let Some(ref path) = op.path {
+                    let quarantine_path = dirs::data_dir()
+                        .unwrap_or_else(|| PathBuf::from("/tmp"))
+                        .join("sentinel")
+                        .join("quarantine")
+                        .join(&op.op_id);
+                    WALOperationType::Quarantine {
+                        path: PathBuf::from(path),
+                        quarantine_path,
+                    }
+                } else {
+                    continue;
+                }
+            }
+            _ => continue,
+        };
+
+        // Check for dependencies - moves depend on their destination folder being created
+        let mut depends_on = Vec::new();
+        if let WALOperationType::Move { destination, .. } = &wal_op {
+            if let Some(parent) = destination.parent() {
+                let parent_str = parent.to_string_lossy().to_string();
+                if let Some(&folder_op_id) = folder_op_ids.get(&parent_str) {
+                    depends_on.push(folder_op_id);
+                }
+            }
+        }
+
+        // Track folder creation for dependency resolution
+        if let WALOperationType::CreateFolder { ref path } = wal_op {
+            let path_str = path.to_string_lossy().to_string();
+            let op_id = if depends_on.is_empty() {
+                journal.add_operation(wal_op)
+            } else {
+                journal.add_operation_with_deps(wal_op, depends_on)
+            };
+            folder_op_ids.insert(path_str, op_id);
+        } else if depends_on.is_empty() {
+            journal.add_operation(wal_op);
+        } else {
+            journal.add_operation_with_deps(wal_op, depends_on);
+        }
+    }
+
+    eprintln!(
+        "[ExecutePlan] Created WAL journal with {} entries",
+        journal.entries.len()
+    );
+
+    // Save the journal
+    let wal_manager = WALManager::new();
+    wal_manager
+        .save_journal(&journal)
+        .map_err(|e| format!("Failed to save WAL journal: {}", e.message))?;
+
+    // Execute using the parallel DAG executor
+    let engine = ExecutionEngine::new();
+    let result = engine.execute_journal(&plan.plan_id).await?;
+
+    eprintln!(
+        "[ExecutePlan] Execution complete: {} completed, {} failed",
+        result.completed_count, result.failed_count
+    );
+
+    // Clean up the journal if all succeeded
+    if result.success {
+        let _ = wal_manager.discard_journal(&plan.plan_id);
+    }
+
+    Ok(result)
 }

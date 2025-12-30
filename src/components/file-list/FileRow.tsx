@@ -12,19 +12,36 @@ import {
 import { cn, formatFileSize, formatDate, getFileType } from '../../lib/utils';
 import { FolderIcon } from '../icons/FolderIcon';
 import { InlineNameEditor } from './InlineNameEditor';
+import { GhostOverlay, getGhostClasses } from '../ghost';
 import type { FileEntry } from '../../types/file';
+import type { GhostState } from '../../types/ghost';
+import '../ghost/GhostAnimations.css';
 
 interface FileRowProps {
   entry: FileEntry;
   isSelected: boolean;
   isFocused: boolean;
   isEditing?: boolean;
+  /** Whether this item is currently a drop target */
+  isDragTarget?: boolean;
+  /** Whether this is a valid drop target (only relevant when isDragTarget is true) */
+  isValidDropTarget?: boolean;
+  /** Ghost visualization state */
+  ghostState?: GhostState;
+  /** For source/destination pairs, the linked path */
+  linkedPath?: string;
   style?: React.CSSProperties;
   onClick: (e: React.MouseEvent) => void;
   onDoubleClick: () => void;
   onContextMenu?: (e: React.MouseEvent) => void;
   onRenameConfirm?: (newName: string) => void;
   onRenameCancel?: () => void;
+  /** Called when user starts dragging this item */
+  onDragStart?: (e: React.MouseEvent) => void;
+  /** Called when dragging enters this item (for drop target highlighting) */
+  onDragEnter?: () => void;
+  /** Called when user drops on this item */
+  onDrop?: () => void;
 }
 
 const fileTypeIcons: Record<string, LucideIcon> = {
@@ -50,27 +67,88 @@ export function FileRow({
   isSelected,
   isFocused,
   isEditing = false,
+  isDragTarget = false,
+  isValidDropTarget = true,
+  ghostState = 'normal',
+  linkedPath,
   style,
   onClick,
   onDoubleClick,
   onContextMenu,
   onRenameConfirm,
   onRenameCancel,
+  onDragStart,
+  onDragEnter,
+  onDrop,
 }: FileRowProps) {
   const Icon = getFileIcon(entry);
+  const ghostClasses = getGhostClasses(ghostState);
+
+  // Handle mouse down for drag initiation
+  const handleMouseDown = (e: React.MouseEvent) => {
+    // Only initiate drag on left click, not during editing
+    if (e.button !== 0 || isEditing) return;
+
+    // Track if this will become a drag
+    const startX = e.clientX;
+    const startY = e.clientY;
+    const threshold = 5; // pixels to move before considering it a drag
+
+    const handleMouseMove = (moveEvent: MouseEvent) => {
+      const deltaX = Math.abs(moveEvent.clientX - startX);
+      const deltaY = Math.abs(moveEvent.clientY - startY);
+
+      if (deltaX > threshold || deltaY > threshold) {
+        // This is a drag, not a click
+        document.removeEventListener('mousemove', handleMouseMove);
+        document.removeEventListener('mouseup', handleMouseUp);
+        onDragStart?.(e);
+      }
+    };
+
+    const handleMouseUp = () => {
+      document.removeEventListener('mousemove', handleMouseMove);
+      document.removeEventListener('mouseup', handleMouseUp);
+    };
+
+    document.addEventListener('mousemove', handleMouseMove);
+    document.addEventListener('mouseup', handleMouseUp);
+  };
+
+  // Handle mouse enter for drop target detection
+  const handleMouseEnter = () => {
+    if (onDragEnter && entry.isDirectory) {
+      onDragEnter();
+    }
+  };
+
+  // Handle mouse up for drop
+  const handleMouseUp = () => {
+    if (onDrop && entry.isDirectory) {
+      onDrop();
+    }
+  };
 
   return (
     <div
       style={style}
+      onMouseDown={handleMouseDown}
+      onMouseEnter={handleMouseEnter}
+      onMouseUp={handleMouseUp}
       onClick={isEditing ? undefined : onClick}
       onDoubleClick={isEditing ? undefined : onDoubleClick}
       onContextMenu={isEditing ? undefined : onContextMenu}
       className={cn(
-        'flex items-center gap-3 px-4 cursor-default select-none',
+        'group relative flex items-center gap-3 px-4 cursor-default select-none',
         'transition-colors duration-75',
         isSelected && isFocused && 'bg-[color:var(--color-file-selected-focused)]',
         isSelected && !isFocused && 'bg-[color:var(--color-file-selected)]',
-        !isSelected && !isEditing && 'hover:bg-[color:var(--color-file-hover)]'
+        !isSelected && !isEditing && !isDragTarget && ghostState === 'normal' && 'hover:bg-[color:var(--color-file-hover)]',
+        // Drop target highlighting
+        isDragTarget && isValidDropTarget && 'ring-2 ring-orange-500 bg-orange-500/10',
+        isDragTarget && !isValidDropTarget && 'ring-2 ring-red-500 bg-red-500/10',
+        // Ghost state styling
+        ghostClasses
       )}
     >
       {/* Icon */}
@@ -109,6 +187,11 @@ export function FileRow({
       <span className="w-20 text-xs text-gray-500 dark:text-gray-500 text-right tabular-nums">
         {entry.isFile ? formatFileSize(entry.size) : '—'}
       </span>
+
+      {/* Ghost overlay for state indicators */}
+      {ghostState !== 'normal' && (
+        <GhostOverlay ghostState={ghostState} linkedPath={linkedPath} />
+      )}
     </div>
   );
 }

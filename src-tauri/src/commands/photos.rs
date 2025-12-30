@@ -35,7 +35,13 @@ pub async fn scan_photos(directories: Vec<String>) -> Result<PhotoScanResult, St
     for dir_path in &directories {
         let path = Path::new(dir_path);
         if path.exists() && path.is_dir() {
-            if let Ok(entries) = scan_directory_for_photos(path, 3) {
+            // Use deeper recursion for Photos Library (Apple stores photos in nested /originals/X/ folders)
+            let depth = if dir_path.contains("Photos Library.photoslibrary") {
+                10
+            } else {
+                5
+            };
+            if let Ok(entries) = scan_directory_for_photos(path, depth) {
                 photos.extend(entries);
                 dirs_scanned += 1;
             }
@@ -65,7 +71,17 @@ pub fn get_photo_directories() -> Vec<(String, String)> {
     let mut dirs = Vec::new();
 
     if let Some(pictures) = dirs::picture_dir() {
+        // Add the main Pictures folder
         dirs.push(("Pictures".to_string(), pictures.to_string_lossy().to_string()));
+
+        // Also add the Apple Photos Library originals folder if it exists
+        let photos_library = pictures.join("Photos Library.photoslibrary/originals");
+        if photos_library.exists() {
+            dirs.push((
+                "Photos Library".to_string(),
+                photos_library.to_string_lossy().to_string(),
+            ));
+        }
     }
     if let Some(desktop) = dirs::desktop_dir() {
         dirs.push(("Desktop".to_string(), desktop.to_string_lossy().to_string()));

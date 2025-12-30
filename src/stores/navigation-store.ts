@@ -1,7 +1,11 @@
 import { create } from 'zustand';
 import type { ViewMode, SortField, SortDirection } from '../types/file';
 
+export type AppMode = 'files' | 'photos';
+
 interface NavigationState {
+  /** Current app mode */
+  appMode: AppMode;
   /** Current directory path */
   currentPath: string;
   /** Navigation history */
@@ -23,6 +27,8 @@ interface NavigationState {
 }
 
 interface NavigationActions {
+  /** Set app mode */
+  setAppMode: (mode: AppMode) => void;
   /** Navigate to a path */
   navigateTo: (path: string) => void;
   /** Go back in history */
@@ -59,6 +65,7 @@ const getInitialViewMode = (): ViewMode => {
 };
 
 export const useNavigationStore = create<NavigationState & NavigationActions>((set, get) => ({
+  appMode: 'files',
   currentPath: '',
   history: [],
   historyIndex: -1,
@@ -68,6 +75,10 @@ export const useNavigationStore = create<NavigationState & NavigationActions>((s
   showHidden: false,
   quickLookActive: false,
   quickLookPath: null,
+
+  setAppMode: (mode: AppMode) => {
+    set({ appMode: mode });
+  },
 
   navigateTo: (path: string) => {
     const { history, historyIndex } = get();

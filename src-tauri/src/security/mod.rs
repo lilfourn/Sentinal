@@ -1,3 +1,5 @@
+pub mod cycle_detection;
+
 use regex::Regex;
 use std::path::{Path, PathBuf};
 

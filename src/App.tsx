@@ -4,6 +4,7 @@ import { FinderLayout } from './components/layout/FinderLayout';
 import { ToastContainer } from './components/Toast/ToastContainer';
 import { AuthGuard } from './components/auth/AuthGuard';
 import { InterruptedJobBanner } from './components/organize/InterruptedJobBanner';
+import { DragDropProvider } from './components/drag-drop';
 import { useNavigationStore } from './stores/navigation-store';
 import { useOrganizeStore } from './stores/organize-store';
 import { useSettingsStore } from './stores/settings-store';
@@ -125,11 +126,11 @@ function AppContent() {
   useAutoRename(watcherEnabled);
 
   return (
-    <>
+    <DragDropProvider>
       <FinderLayout />
       <ToastContainer />
       <InterruptedJobBanner />
-    </>
+    </DragDropProvider>
   );
 }
 

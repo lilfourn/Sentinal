@@ -12,15 +12,19 @@ import {
   type LucideIcon,
 } from 'lucide-react';
 import { ContextMenu, buildFileContextMenuItems, buildBackgroundContextMenuItems, type ContextMenuPosition } from '../ContextMenu/ContextMenu';
+import { useDragDropContext } from '../drag-drop';
 import { FolderIcon } from '../icons/FolderIcon';
 import { SelectionOverlay } from './SelectionOverlay';
+import { GhostOverlay, getGhostClasses } from '../ghost';
 import { useNavigationStore } from '../../stores/navigation-store';
 import { useSelectionStore } from '../../stores/selection-store';
 import { useOrganizeStore } from '../../stores/organize-store';
+import { useGhostStore } from '../../stores/ghost-store';
 import { showSuccess, showError } from '../../stores/toast-store';
 import { useMarqueeSelection } from '../../hooks/useMarqueeSelection';
 import { cn, getFileType, openFile } from '../../lib/utils';
 import type { FileEntry } from '../../types/file';
+import '../ghost/GhostAnimations.css';
 
 interface FileColumnsViewProps {
   entries: FileEntry[];
@@ -56,6 +60,14 @@ export function FileColumnsView({ entries }: FileColumnsViewProps) {
     startCreating,
   } = useSelectionStore();
   const { startOrganize } = useOrganizeStore();
+  const ghostMap = useGhostStore((state) => state.ghostMap);
+  const {
+    dropTarget,
+    startDrag: startFileDrag,
+    setDropTarget,
+    executeDrop,
+    isDragging: isDragDropActive,
+  } = useDragDropContext();
 
   // Marquee selection
   const {
@@ -176,11 +188,53 @@ export function FileColumnsView({ entries }: FileColumnsViewProps) {
     }
   }, []);
 
+  // Handle drag start on an item
+  const handleDragStart = useCallback(
+    (entry: FileEntry, e: React.MouseEvent) => {
+      e.preventDefault();
+      const itemsToDrag = selectedPaths.has(entry.path)
+        ? entries.filter((e) => selectedPaths.has(e.path))
+        : [entry];
+
+      startFileDrag(itemsToDrag, currentPath);
+    },
+    [selectedPaths, entries, currentPath, startFileDrag]
+  );
+
+  // Handle drag entering a directory
+  const handleDragEnter = useCallback(
+    (entry: FileEntry) => {
+      if (entry.isDirectory && isDragDropActive) {
+        setDropTarget(entry.path, true);
+      }
+    },
+    [isDragDropActive, setDropTarget]
+  );
+
+  // Handle dropping on a directory
+  const handleDrop = useCallback(
+    async (entry: FileEntry) => {
+      if (entry.isDirectory && isDragDropActive) {
+        setDropTarget(entry.path, true);
+        await executeDrop();
+      }
+    },
+    [isDragDropActive, setDropTarget, executeDrop]
+  );
+
+  // Clear drop target when mouse leaves
+  const handleMouseLeave = useCallback(() => {
+    if (isDragDropActive) {
+      setDropTarget(null, false);
+    }
+  }, [isDragDropActive, setDropTarget]);
+
   return (
     <div
       ref={containerRef}
       onClick={handleContainerClick}
       onMouseDown={handleContainerMouseDown}
+      onMouseLeave={handleMouseLeave}
       onContextMenu={handleBackgroundContextMenu}
       className="relative h-full overflow-auto p-4 focus:outline-none select-none"
       tabIndex={0}
@@ -190,20 +244,60 @@ export function FileColumnsView({ entries }: FileColumnsViewProps) {
         {entries.map((entry) => {
           const Icon = getFileIcon(entry);
           const isSelected = selectedPaths.has(entry.path);
+          const isDragTarget = dropTarget?.path === entry.path;
+          const isValidDropTarget = isDragTarget ? dropTarget.isValid : true;
+          const ghostInfo = ghostMap.get(entry.path);
+          const ghostState = ghostInfo?.state || 'normal';
+          const linkedPath = ghostInfo?.linkedPath;
+          const ghostClasses = getGhostClasses(ghostState);
+
+          // Drag initiation handler
+          const handleMouseDown = (e: React.MouseEvent) => {
+            if (e.button !== 0) return;
+
+            const startX = e.clientX;
+            const startY = e.clientY;
+            const threshold = 5;
+
+            const onMouseMove = (moveEvent: MouseEvent) => {
+              const deltaX = Math.abs(moveEvent.clientX - startX);
+              const deltaY = Math.abs(moveEvent.clientY - startY);
+
+              if (deltaX > threshold || deltaY > threshold) {
+                document.removeEventListener('mousemove', onMouseMove);
+                document.removeEventListener('mouseup', onMouseUp);
+                handleDragStart(entry, e);
+              }
+            };
+
+            const onMouseUp = () => {
+              document.removeEventListener('mousemove', onMouseMove);
+              document.removeEventListener('mouseup', onMouseUp);
+            };
+
+            document.addEventListener('mousemove', onMouseMove);
+            document.addEventListener('mouseup', onMouseUp);
+          };
 
           return (
             <div
               key={entry.path}
               data-path={entry.path}
+              onMouseDown={handleMouseDown}
+              onMouseEnter={() => entry.isDirectory && handleDragEnter(entry)}
+              onMouseUp={() => entry.isDirectory && handleDrop(entry)}
               onClick={(e) => handleClick(entry, e)}
               onDoubleClick={() => handleDoubleClick(entry)}
               onContextMenu={(e) => handleContextMenu(entry, e)}
               className={cn(
-                'flex items-center gap-2 px-2 py-1 rounded cursor-default select-none',
+                'group relative flex items-center gap-2 px-2 py-1 rounded cursor-default select-none',
                 'break-inside-avoid mb-0.5',
                 'transition-colors duration-75',
                 isSelected && 'bg-orange-500/20',
-                !isSelected && 'hover:bg-gray-500/10'
+                !isSelected && !isDragTarget && ghostState === 'normal' && 'hover:bg-gray-500/10',
+                isDragTarget && isValidDropTarget && 'ring-2 ring-orange-500 bg-orange-500/10',
+                isDragTarget && !isValidDropTarget && 'ring-2 ring-red-500 bg-red-500/10',
+                ghostClasses
               )}
             >
               {entry.isDirectory ? (
@@ -221,6 +315,9 @@ export function FileColumnsView({ entries }: FileColumnsViewProps) {
               >
                 {entry.name}
               </span>
+              {ghostState !== 'normal' && (
+                <GhostOverlay ghostState={ghostState} linkedPath={linkedPath} />
+              )}
             </div>
           );
         })}
