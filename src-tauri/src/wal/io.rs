@@ -151,24 +151,29 @@ pub fn atomic_write(path: &Path, data: &[u8]) -> Result<(), SafeIoError> {
 /// * `Ok(())` on success (or if directory sync is not supported)
 /// * `Err(SafeIoError)` on failure
 pub fn sync_directory(path: &Path) -> Result<(), SafeIoError> {
-    // On Unix-like systems, we can fsync a directory
+    // On Unix-like systems, we can fsync a directory by opening it read-only
     #[cfg(unix)]
     {
-        use std::os::unix::fs::OpenOptionsExt;
-
-        let dir = OpenOptions::new()
-            .read(true)
-            .custom_flags(libc::O_DIRECTORY)
-            .open(path)
-            .map_err(|e| SafeIoError {
-                message: format!("Failed to open directory {}: {}", path.display(), e),
-                kind: SafeIoErrorKind::SyncError,
-            })?;
-
-        dir.sync_all().map_err(|e| SafeIoError {
-            message: format!("Failed to sync directory {}: {}", path.display(), e),
-            kind: SafeIoErrorKind::SyncError,
-        })?;
+        // Open directory with O_RDONLY (which is the default for read(true))
+        // Note: Some systems require O_DIRECTORY but most allow opening directories
+        // with just read access
+        match File::open(path) {
+            Ok(dir) => {
+                dir.sync_all().map_err(|e| SafeIoError {
+                    message: format!("Failed to sync directory {}: {}", path.display(), e),
+                    kind: SafeIoErrorKind::SyncError,
+                })?;
+            }
+            Err(e) => {
+                // If we can't open the directory, log but don't fail
+                // This can happen on some filesystems
+                tracing::debug!(
+                    path = %path.display(),
+                    error = %e,
+                    "Could not open directory for sync (non-fatal)"
+                );
+            }
+        }
     }
 
     // On Windows, directory sync is not directly supported

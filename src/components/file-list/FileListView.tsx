@@ -13,6 +13,8 @@ import { useNavigationStore } from '../../stores/navigation-store';
 import { useSelectionStore } from '../../stores/selection-store';
 import { useOrganizeStore } from '../../stores/organize-store';
 import { useDelete } from '../../hooks/useDelete';
+import { useNativeDrag } from '../../hooks/useNativeDrag';
+import { createDragGhost } from '../../lib/drag-visuals';
 import { openFile } from '../../lib/utils';
 import type { FileEntry } from '../../types/file';
 import type { SelectionRect } from '../../hooks/useMarqueeSelection';
@@ -54,6 +56,14 @@ export function FileListView({ entries }: FileListViewProps) {
     executeDrop,
     isDragging: isDragDropActive,
   } = useDragDropContext();
+
+  // Native drag hooks for spring loading and anti-flicker
+  const {
+    handleDragEnter: nativeDragEnter,
+    handleDragLeave: nativeDragLeave,
+    handleDrop: nativeDragDrop,
+    dragCounter,
+  } = useNativeDrag();
 
   // Check if we should show the new item row in this directory
   const isCreatingHere = creatingType !== null && creatingInPath === currentPath;
@@ -315,38 +325,96 @@ export function FileListView({ entries }: FileListViewProps) {
     requestDelete(path);
   }, [requestDelete]);
 
-  // Handle drag start on an item
+  // Handle native HTML5 drag start on an item
   const handleDragStart = useCallback(
-    (entry: FileEntry) => {
+    (entry: FileEntry, e: React.DragEvent) => {
+      console.log('[FileListView] handleDragStart:', { path: entry.path, isDirectory: entry.isDirectory });
       // Get all selected items, or just this one if not selected
       const itemsToDrag = selectedPaths.has(entry.path)
-        ? entries.filter((e) => selectedPaths.has(e.path))
+        ? entries.filter((ent) => selectedPaths.has(ent.path))
         : [entry];
 
+      // 1. Set sentinel/* data for chat panel compatibility
+      e.dataTransfer.setData('sentinel/path', entry.path);
+      e.dataTransfer.setData('sentinel/type', entry.isDirectory ? 'folder' : 'file');
+      e.dataTransfer.setData('sentinel/name', entry.name);
+      e.dataTransfer.setData('sentinel/size', String(entry.size || 0));
+      if (entry.mimeType) {
+        e.dataTransfer.setData('sentinel/mime', entry.mimeType);
+      }
+
+      // 2. Set text/uri-list for external app support (Finder, VS Code, etc.)
+      const uriList = itemsToDrag.map((f) => `file://${f.path}`).join('\r\n');
+      e.dataTransfer.setData('text/uri-list', uriList);
+      e.dataTransfer.setData('text/plain', uriList);
+
+      // 3. Set internal app data (for multi-file operations)
+      e.dataTransfer.setData('sentinel/json', JSON.stringify(itemsToDrag.map((f) => f.path)));
+      e.dataTransfer.effectAllowed = 'copyMove';
+
+      // 4. Create native drag image (stacked cards)
+      const ghost = createDragGhost(itemsToDrag);
+      document.body.appendChild(ghost);
+      e.dataTransfer.setDragImage(ghost, 16, 16);
+      // Cleanup after browser captures the image
+      requestAnimationFrame(() => ghost.remove());
+
+      // 5. Start drag in context (for validation and execution)
       startDrag(itemsToDrag, currentPath);
     },
     [selectedPaths, entries, currentPath, startDrag]
   );
 
-  // Handle drag entering a directory (for drop target highlighting)
+  // Handle native drag entering a directory (for drop target highlighting)
   const handleDragEnter = useCallback(
-    (entry: FileEntry) => {
-      if (entry.isDirectory && isDragDropActive) {
+    (entry: FileEntry, e: React.DragEvent) => {
+      e.preventDefault();
+      nativeDragEnter(entry.path, entry.isDirectory);
+
+      if (entry.isDirectory && dragCounter.current === 1) {
         setDropTarget(entry.path, true);
       }
     },
-    [isDragDropActive, setDropTarget]
+    [nativeDragEnter, dragCounter, setDropTarget]
+  );
+
+  // Handle native drag over (required to allow drop)
+  const handleDragOver = useCallback(
+    (_entry: FileEntry, e: React.DragEvent) => {
+      e.preventDefault();
+      // Set copy/move based on Alt key
+      e.dataTransfer.dropEffect = e.altKey ? 'copy' : 'move';
+    },
+    []
+  );
+
+  // Handle native drag leave
+  const handleDragLeave = useCallback(
+    (entry: FileEntry, _e: React.DragEvent) => {
+      nativeDragLeave();
+
+      if (entry.isDirectory && dragCounter.current === 0) {
+        setDropTarget(null, false);
+      }
+    },
+    [nativeDragLeave, dragCounter, setDropTarget]
   );
 
   // Handle dropping on a directory
   const handleDrop = useCallback(
-    async (entry: FileEntry) => {
-      if (entry.isDirectory && isDragDropActive) {
-        setDropTarget(entry.path, true);
-        await executeDrop();
+    async (entry: FileEntry, e: React.DragEvent) => {
+      e.preventDefault();
+      console.log('[FileListView] handleDrop:', { path: entry.path, isDirectory: entry.isDirectory });
+      nativeDragDrop();
+
+      if (entry.isDirectory) {
+        // Pass target path directly to avoid async state timing issues
+        const result = await executeDrop(entry.path);
+        console.log('[FileListView] executeDrop result:', result);
+        setDropTarget(null, false);
       }
     },
-    [isDragDropActive, setDropTarget, executeDrop]
+    [nativeDragDrop, executeDrop, setDropTarget]
   );
 
   // Clear drop target when mouse leaves the list area
@@ -540,9 +608,11 @@ export function FileListView({ entries }: FileListViewProps) {
               onContextMenu={(e) => handleContextMenu(entry, e)}
               onRenameConfirm={(newName) => handleRenameConfirm(entry.path, newName)}
               onRenameCancel={handleRenameCancel}
-              onDragStart={() => handleDragStart(entry)}
-              onDragEnter={() => handleDragEnter(entry)}
-              onDrop={() => handleDrop(entry)}
+              onDragStart={(e) => handleDragStart(entry, e)}
+              onDragEnter={(e) => handleDragEnter(entry, e)}
+              onDragOver={(e) => handleDragOver(entry, e)}
+              onDragLeave={(e) => handleDragLeave(entry, e)}
+              onDrop={(e) => handleDrop(entry, e)}
             />
           );
         })}

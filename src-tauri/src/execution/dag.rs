@@ -272,6 +272,7 @@ mod tests {
             sequence,
             deps,
         )
+        .expect("Failed to create test entry")
     }
 
     #[test]

@@ -9,10 +9,8 @@ use std::process::Command;
 
 use super::PathValidator;
 
-/// Shell metacharacters that are never allowed in commands
-const DANGEROUS_CHARS: &[char] = &[
-    ';', '|', '&', '$', '`', '(', ')', '{', '}', '<', '>', '!', '\\', '\n', '\r', '\0',
-];
+// Shell metacharacter constants moved to reject_shell_metacharacters() method
+// to distinguish between never-allowed and user-approvable characters
 
 /// Maximum output size in bytes (10MB)
 const MAX_OUTPUT_SIZE: usize = 10 * 1024 * 1024;
@@ -25,11 +23,12 @@ pub enum AllowedCommand {
         path: PathBuf,
         args: Vec<String>,
     },
-    /// Find files: find <path> -name <pattern>
+    /// Find files: find <path> -name|-iname <pattern>
     Find {
         path: PathBuf,
         name_pattern: String,
         max_depth: Option<u32>,
+        case_insensitive: bool,
     },
     /// Get file type info: file <path>
     File {
@@ -91,6 +90,10 @@ pub enum AllowedCommand {
 pub struct CommandSandbox {
     /// Optional root directory constraint
     root_dir: Option<PathBuf>,
+    /// User-approved command patterns (bypass metacharacter check)
+    approved_patterns: Vec<String>,
+    /// Force mode - bypass metacharacter checks (use with caution)
+    force_mode: bool,
 }
 
 /// Error type for command sandbox operations
@@ -109,6 +112,11 @@ pub enum CommandSandboxErrorKind {
     ProtectedPath,
     ParseError,
     ExecutionFailed,
+    /// Command blocked but can be approved by user
+    NeedsApproval {
+        command: String,
+        reason: String,
+    },
 }
 
 impl std::fmt::Display for CommandSandboxError {
@@ -125,7 +133,75 @@ impl CommandSandbox {
     /// # Arguments
     /// * `root_dir` - Optional directory to constrain all paths within
     pub fn new(root_dir: Option<PathBuf>) -> Self {
-        Self { root_dir }
+        Self {
+            root_dir,
+            approved_patterns: Vec::new(),
+            force_mode: false,
+        }
+    }
+
+    /// Enable force mode to bypass metacharacter checks
+    ///
+    /// WARNING: Use only for user-approved commands
+    pub fn with_force_mode(mut self, force: bool) -> Self {
+        self.force_mode = force;
+        self
+    }
+
+    /// Set approved patterns that bypass metacharacter checks
+    #[allow(dead_code)]
+    pub fn with_approved_patterns(mut self, patterns: Vec<String>) -> Self {
+        self.approved_patterns = patterns;
+        self
+    }
+
+    /// Check if a command matches any approved pattern
+    fn is_approved(&self, cmd: &str) -> bool {
+        if self.force_mode {
+            return true;
+        }
+        self.approved_patterns
+            .iter()
+            .any(|pattern| cmd.contains(pattern) || pattern == cmd)
+    }
+
+    /// Expand ~ to home directory path
+    ///
+    /// Shell expansion doesn't happen when we use Command::new() directly,
+    /// so we need to handle ~ manually.
+    fn expand_tilde(cmd: &str) -> String {
+        let Some(home) = dirs::home_dir() else {
+            return cmd.to_string();
+        };
+        let home_str = home.to_string_lossy();
+
+        let mut result = String::with_capacity(cmd.len() + 50);
+        let mut chars = cmd.chars().peekable();
+        let mut prev_was_space_or_start = true;
+
+        while let Some(c) = chars.next() {
+            if c == '~' && prev_was_space_or_start {
+                // Check if it's ~/ or ~ followed by space/end
+                match chars.peek() {
+                    Some('/') | Some(' ') | None => {
+                        result.push_str(&home_str);
+                    }
+                    Some('"') => {
+                        // Handle quoted paths like "~/"
+                        result.push_str(&home_str);
+                    }
+                    _ => {
+                        // ~username style - don't expand, just keep ~
+                        result.push(c);
+                    }
+                }
+            } else {
+                result.push(c);
+            }
+            prev_was_space_or_start = c == ' ' || c == '"' || c == '\'';
+        }
+
+        result
     }
 
     /// Parse a user command string into an allowed command
@@ -137,8 +213,14 @@ impl CommandSandbox {
     /// * `Ok(AllowedCommand)` if the command is in the allowlist
     /// * `Err(CommandSandboxError)` if the command is not allowed
     pub fn parse_command(&self, cmd: &str) -> Result<AllowedCommand, CommandSandboxError> {
-        // First, reject any shell metacharacters
-        Self::reject_shell_metacharacters(cmd)?;
+        // Expand ~ to home directory (shell doesn't do this when we bypass it)
+        let expanded_cmd = Self::expand_tilde(cmd);
+        let cmd = expanded_cmd.as_str();
+
+        // First, reject any shell metacharacters (unless approved)
+        if !self.is_approved(cmd) {
+            Self::reject_shell_metacharacters(cmd)?;
+        }
 
         // Split into parts
         let parts: Vec<&str> = cmd.split_whitespace().collect();
@@ -184,6 +266,7 @@ impl CommandSandbox {
                 path,
                 name_pattern,
                 max_depth,
+                case_insensitive,
             } => {
                 self.validate_path(path)?;
                 let mut cmd = Command::new("find");
@@ -191,7 +274,9 @@ impl CommandSandbox {
                 if let Some(depth) = max_depth {
                     cmd.args(["-maxdepth", &depth.to_string()]);
                 }
-                cmd.args(["-name", name_pattern]);
+                // Use -iname for case-insensitive, -name otherwise
+                let name_flag = if *case_insensitive { "-iname" } else { "-name" };
+                cmd.args([name_flag, name_pattern]);
                 cmd.output()
             }
             AllowedCommand::File { path } => {
@@ -231,8 +316,8 @@ impl CommandSandbox {
             }
             AllowedCommand::Grep { pattern, path, args } => {
                 self.validate_path(path)?;
-                // Validate pattern doesn't contain shell metacharacters
-                Self::reject_shell_metacharacters(pattern)?;
+                // Note: Pattern is passed via .arg() so shell metacharacters are safe
+                // (they're just regex syntax, not shell operators)
                 Command::new("grep")
                     .args(args)
                     .arg(pattern)
@@ -241,7 +326,7 @@ impl CommandSandbox {
             }
             AllowedCommand::Rg { pattern, path, args } => {
                 self.validate_path(path)?;
-                Self::reject_shell_metacharacters(pattern)?;
+                // Note: Pattern is passed via .arg() so shell metacharacters are safe
                 Command::new("rg")
                     .args(args)
                     .arg(pattern)
@@ -295,8 +380,18 @@ impl CommandSandbox {
     }
 
     /// Reject commands containing shell metacharacters
+    ///
+    /// Returns `NeedsApproval` for metacharacters that could be safe in certain contexts,
+    /// allowing the user to approve them.
     fn reject_shell_metacharacters(input: &str) -> Result<(), CommandSandboxError> {
-        for c in DANGEROUS_CHARS {
+        // Characters that can be user-approved (used in regex, find expressions, etc.)
+        const APPROVABLE_CHARS: &[char] = &['|', '(', ')', '<', '>'];
+
+        // Characters that are never allowed (command injection, code execution)
+        const NEVER_ALLOWED_CHARS: &[char] = &[';', '&', '$', '`', '{', '}', '!', '\\', '\n', '\r', '\0'];
+
+        // Check for never-allowed characters first
+        for c in NEVER_ALLOWED_CHARS {
             if input.contains(*c) {
                 let char_display = match *c {
                     '\n' => "\\n".to_string(),
@@ -313,6 +408,26 @@ impl CommandSandbox {
                 });
             }
         }
+
+        // Check for approvable characters - return NeedsApproval
+        for c in APPROVABLE_CHARS {
+            if input.contains(*c) {
+                return Err(CommandSandboxError {
+                    message: format!(
+                        "Command contains '{}' which requires approval. This may be safe for regex patterns or find expressions.",
+                        c
+                    ),
+                    kind: CommandSandboxErrorKind::NeedsApproval {
+                        command: input.to_string(),
+                        reason: format!(
+                            "Contains '{}' - could be shell operator or valid regex/find syntax",
+                            c
+                        ),
+                    },
+                });
+            }
+        }
+
         Ok(())
     }
 
@@ -401,16 +516,27 @@ impl CommandSandbox {
         let mut path = PathBuf::from(".");
         let mut name_pattern = String::new();
         let mut max_depth = None;
+        let mut case_insensitive = false;
         let mut i = 0;
 
         while i < args.len() {
             match args[i] {
                 "-name" if i + 1 < args.len() => {
                     name_pattern = args[i + 1].to_string();
+                    case_insensitive = false;
+                    i += 2;
+                }
+                "-iname" if i + 1 < args.len() => {
+                    name_pattern = args[i + 1].to_string();
+                    case_insensitive = true;
                     i += 2;
                 }
                 "-maxdepth" if i + 1 < args.len() => {
                     max_depth = args[i + 1].parse().ok();
+                    i += 2;
+                }
+                "-type" if i + 1 < args.len() => {
+                    // Allow -type f/d but ignore it for now (we accept it but don't filter)
                     i += 2;
                 }
                 arg if !arg.starts_with('-') && path == PathBuf::from(".") => {
@@ -423,7 +549,7 @@ impl CommandSandbox {
 
         if name_pattern.is_empty() {
             return Err(CommandSandboxError {
-                message: "find requires -name pattern".to_string(),
+                message: "find requires -name or -iname pattern".to_string(),
                 kind: CommandSandboxErrorKind::ParseError,
             });
         }
@@ -432,6 +558,7 @@ impl CommandSandbox {
             path,
             name_pattern,
             max_depth,
+            case_insensitive,
         })
     }
 
@@ -680,11 +807,32 @@ mod tests {
 
     #[test]
     fn test_reject_shell_metacharacters() {
+        // Safe commands
         assert!(CommandSandbox::reject_shell_metacharacters("ls -la").is_ok());
+
+        // Never-allowed characters (command injection)
         assert!(CommandSandbox::reject_shell_metacharacters("ls; rm -rf /").is_err());
-        assert!(CommandSandbox::reject_shell_metacharacters("ls | grep foo").is_err());
         assert!(CommandSandbox::reject_shell_metacharacters("$(whoami)").is_err());
         assert!(CommandSandbox::reject_shell_metacharacters("ls && rm").is_err());
+
+        // Approvable characters (return NeedsApproval, not ShellMetacharacter)
+        let pipe_result = CommandSandbox::reject_shell_metacharacters("ls | grep foo");
+        assert!(pipe_result.is_err());
+        if let Err(e) = pipe_result {
+            assert!(matches!(e.kind, CommandSandboxErrorKind::NeedsApproval { .. }));
+        }
+    }
+
+    #[test]
+    fn test_approved_commands() {
+        // With force mode, metacharacters are allowed
+        let sandbox = CommandSandbox::new(None).with_force_mode(true);
+        assert!(sandbox.parse_command("find . -name '*.rs' -o -name '*.md'").is_ok());
+
+        // With approved pattern, matching commands are allowed
+        let sandbox = CommandSandbox::new(None)
+            .with_approved_patterns(vec!["find".to_string()]);
+        assert!(sandbox.parse_command("find . -name '*.rs'").is_ok());
     }
 
     #[test]

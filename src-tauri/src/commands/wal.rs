@@ -158,9 +158,9 @@ pub async fn wal_add_operation(
 
     // Add operation
     let entry_id = if deps.is_empty() {
-        journal.add_operation(operation)
+        journal.add_operation(operation)?
     } else {
-        journal.add_operation_with_deps(operation, deps)
+        journal.add_operation_with_deps(operation, deps)?
     };
 
     manager.save_journal(&journal).map_err(|e| e.message)?;
@@ -263,9 +263,9 @@ pub async fn wal_execute_operations(
         };
 
         let uuid = if deps.is_empty() {
-            builder.add_operation(operation)
+            builder.add_operation(operation)?
         } else {
-            builder.add_operation_with_deps(operation, deps)
+            builder.add_operation_with_deps(operation, deps)?
         };
 
         if !op_id.is_empty() {

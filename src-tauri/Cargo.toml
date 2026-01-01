@@ -71,9 +71,6 @@ regex = "1"
 # Safe shell command execution for AI agent tools
 duct = "0.13"
 
-# Embedded database for usage tracking
-sled = "0.34"
-
 # Thumbnail generation
 image = "0.25"
 base64 = "0.22"
@@ -105,6 +102,26 @@ fs2 = "0.4"
 # Structured logging with filtering
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# SQLite for content cache
+rusqlite = { version = "0.32", features = ["bundled"] }
+dotenvy = "0.15.7"
+pdf-extract = "0.10.0"
+calamine = "0.32.0"
+docx-rs = "0.4.18"
+
+# PDF rendering (optional, for full pdfium support)
+# pdfium-render = { version = "0.8", features = ["image", "thread_safe"], optional = true }
+
+[features]
+default = []
+pdfium = ["dep:pdfium-render"]
+pdfium-bind = []
+
+[dependencies.pdfium-render]
+version = "0.8"
+features = ["image", "thread_safe"]
+optional = true
 
 # macOS-specific dependencies for NSFileCoordinator
 [target.'cfg(target_os = "macos")'.dependencies]

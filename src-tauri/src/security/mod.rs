@@ -1,14 +1,17 @@
 pub mod command_sandbox;
 pub mod cycle_detection;
 pub mod regex_validator;
+pub mod shell_permissions;
 
 use regex::Regex;
 use std::path::{Component, Path, PathBuf};
 
 #[allow(unused_imports)]
-pub use command_sandbox::{AllowedCommand, CommandSandbox, CommandSandboxError};
+pub use command_sandbox::{AllowedCommand, CommandSandbox, CommandSandboxError, CommandSandboxErrorKind};
 #[allow(unused_imports)]
 pub use regex_validator::{safe_regex, validate_regex_complexity, RegexValidationError};
+#[allow(unused_imports)]
+pub use shell_permissions::ShellPermissions;
 
 /// Security validator for path operations
 pub struct PathValidator;

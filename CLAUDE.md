@@ -75,10 +75,11 @@ cargo test
 
 ### Chat System (`src/components/ChatPanel/`)
 - **ChatInput** - Model selector (Haiku/Sonnet/Opus), @mention support
-- **MessageItem** - Extended thinking display, tool visualization
+- **MessageItem** - Extended thinking display, tool visualization (memoized)
 - **ThoughtAccordion** - Shows agent tool calls (search, read, inspect)
-- **MentionPopover** - File/folder picker with context strategies
-- **ContextStack** - Shows active file/folder context
+- **InlineMentionDropdown** - File/folder picker with context strategies
+- **MessageList** - Message rendering with error boundary
+- **StreamingIndicator** - Visual feedback during AI responses
 
 ## Backend (src-tauri/)
 

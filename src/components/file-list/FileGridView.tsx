@@ -26,6 +26,8 @@ import { useOrganizeStore } from '../../stores/organize-store';
 import { useThumbnail } from '../../hooks/useThumbnail';
 import { useMarqueeSelection } from '../../hooks/useMarqueeSelection';
 import { useDelete } from '../../hooks/useDelete';
+import { useNativeDrag } from '../../hooks/useNativeDrag';
+import { createDragGhost } from '../../lib/drag-visuals';
 import { cn, getFileType, isThumbnailSupported, openFile } from '../../lib/utils';
 import type { FileEntry } from '../../types/file';
 import type { GhostState } from '../../types/ghost';
@@ -67,9 +69,11 @@ interface FileGridItemProps {
   onContextMenu: (e: React.MouseEvent) => void;
   onRenameConfirm?: (newName: string) => void;
   onRenameCancel?: () => void;
-  onDragStart?: (e: React.MouseEvent) => void;
-  onDragEnter?: () => void;
-  onDrop?: () => void;
+  onDragStart?: (e: React.DragEvent) => void;
+  onDragEnter?: (e: React.DragEvent) => void;
+  onDragOver?: (e: React.DragEvent) => void;
+  onDragLeave?: (e: React.DragEvent) => void;
+  onDrop?: (e: React.DragEvent) => void;
 }
 
 function FileGridItem({
@@ -87,6 +91,8 @@ function FileGridItem({
   onRenameCancel,
   onDragStart,
   onDragEnter,
+  onDragOver,
+  onDragLeave,
   onDrop,
 }: FileGridItemProps) {
   const Icon = getFileIcon(entry);
@@ -98,56 +104,42 @@ function FileGridItem({
   );
   const ghostClasses = getGhostClasses(ghostState);
 
-  // Handle mouse down for drag initiation
-  const handleMouseDown = (e: React.MouseEvent) => {
-    if (e.button !== 0 || isEditing) return;
-
-    const startX = e.clientX;
-    const startY = e.clientY;
-    const threshold = 5;
-
-    const handleMouseMove = (moveEvent: MouseEvent) => {
-      const deltaX = Math.abs(moveEvent.clientX - startX);
-      const deltaY = Math.abs(moveEvent.clientY - startY);
-
-      if (deltaX > threshold || deltaY > threshold) {
-        document.removeEventListener('mousemove', handleMouseMove);
-        document.removeEventListener('mouseup', handleMouseUp);
-        onDragStart?.(e);
-      }
-    };
-
-    const handleMouseUp = () => {
-      document.removeEventListener('mousemove', handleMouseMove);
-      document.removeEventListener('mouseup', handleMouseUp);
-    };
-
-    document.addEventListener('mousemove', handleMouseMove);
-    document.addEventListener('mouseup', handleMouseUp);
+  // Native HTML5 drag start - delegate to parent for full setup
+  const handleDragStart = (e: React.DragEvent) => {
+    console.log('[FileGridItem] handleDragStart:', { path: entry.path, isDirectory: entry.isDirectory });
+    onDragStart?.(e);
   };
 
-  // Handle HTML5 drag start for chat panel context
-  const handleDragStartHTML5 = (e: React.DragEvent) => {
-    // Set sentinel custom MIME types for chat panel
-    e.dataTransfer.setData('sentinel/path', entry.path);
-    e.dataTransfer.setData('sentinel/type', entry.isDirectory ? 'folder' : 'file');
-    e.dataTransfer.setData('sentinel/name', entry.name);
-    e.dataTransfer.setData('sentinel/size', String(entry.size || 0));
-    if (entry.mimeType) {
-      e.dataTransfer.setData('sentinel/mime', entry.mimeType);
-    }
-    e.dataTransfer.effectAllowed = 'copyLink';
-  };
-
-  const handleMouseEnter = () => {
-    if (onDragEnter && entry.isDirectory) {
-      onDragEnter();
+  // Native drag enter - only trigger for directories (drop targets)
+  const handleDragEnter = (e: React.DragEvent) => {
+    if (entry.isDirectory) {
+      onDragEnter?.(e);
     }
   };
 
-  const handleMouseUp = () => {
-    if (onDrop && entry.isDirectory) {
-      onDrop();
+  // Native drag over - must prevent default to allow drop
+  const handleDragOver = (e: React.DragEvent) => {
+    if (entry.isDirectory) {
+      e.preventDefault();
+      e.stopPropagation();
+      onDragOver?.(e);
+    }
+  };
+
+  // Native drag leave
+  const handleDragLeave = (e: React.DragEvent) => {
+    if (entry.isDirectory) {
+      onDragLeave?.(e);
+    }
+  };
+
+  // Native drop
+  const handleDrop = (e: React.DragEvent) => {
+    console.log('[FileGridItem] handleDrop:', { path: entry.path, isDirectory: entry.isDirectory });
+    if (entry.isDirectory) {
+      e.preventDefault();
+      e.stopPropagation();
+      onDrop?.(e);
     }
   };
 
@@ -155,10 +147,11 @@ function FileGridItem({
     <div
       data-path={entry.path}
       draggable={!isEditing}
-      onDragStart={handleDragStartHTML5}
-      onMouseDown={handleMouseDown}
-      onMouseEnter={handleMouseEnter}
-      onMouseUp={handleMouseUp}
+      onDragStart={handleDragStart}
+      onDragEnter={handleDragEnter}
+      onDragOver={handleDragOver}
+      onDragLeave={handleDragLeave}
+      onDrop={handleDrop}
       onClick={isEditing ? undefined : onClick}
       onDoubleClick={isEditing ? undefined : onDoubleClick}
       onContextMenu={isEditing ? undefined : onContextMenu}
@@ -285,6 +278,14 @@ export function FileGridView({ entries }: FileGridViewProps) {
     executeDrop,
     isDragging: isDragDropActive,
   } = useDragDropContext();
+
+  // Native drag hooks for spring loading and anti-flicker
+  const {
+    handleDragEnter: nativeDragEnter,
+    handleDragLeave: nativeDragLeave,
+    handleDrop: nativeDragDrop,
+    dragCounter,
+  } = useNativeDrag();
 
   // Check if we should show the new item in this directory
   const isCreatingHere = creatingType !== null && creatingInPath === currentPath;
@@ -474,37 +475,96 @@ export function FileGridView({ entries }: FileGridViewProps) {
     requestDelete(path);
   }, [requestDelete]);
 
-  // Handle drag start on an item
+  // Handle native HTML5 drag start on an item
   const handleDragStart = useCallback(
-    (entry: FileEntry) => {
+    (entry: FileEntry, e: React.DragEvent) => {
+      console.log('[FileGridView] handleDragStart:', { path: entry.path, isDirectory: entry.isDirectory });
+      // Get all selected items, or just this one if not selected
       const itemsToDrag = selectedPaths.has(entry.path)
-        ? entries.filter((e) => selectedPaths.has(e.path))
+        ? entries.filter((ent) => selectedPaths.has(ent.path))
         : [entry];
 
+      // 1. Set sentinel/* data for chat panel compatibility
+      e.dataTransfer.setData('sentinel/path', entry.path);
+      e.dataTransfer.setData('sentinel/type', entry.isDirectory ? 'folder' : 'file');
+      e.dataTransfer.setData('sentinel/name', entry.name);
+      e.dataTransfer.setData('sentinel/size', String(entry.size || 0));
+      if (entry.mimeType) {
+        e.dataTransfer.setData('sentinel/mime', entry.mimeType);
+      }
+
+      // 2. Set text/uri-list for external app support (Finder, VS Code, etc.)
+      const uriList = itemsToDrag.map((f) => `file://${f.path}`).join('\r\n');
+      e.dataTransfer.setData('text/uri-list', uriList);
+      e.dataTransfer.setData('text/plain', uriList);
+
+      // 3. Set internal app data (for multi-file operations)
+      e.dataTransfer.setData('sentinel/json', JSON.stringify(itemsToDrag.map((f) => f.path)));
+      e.dataTransfer.effectAllowed = 'copyMove';
+
+      // 4. Create native drag image (stacked cards)
+      const ghost = createDragGhost(itemsToDrag);
+      document.body.appendChild(ghost);
+      e.dataTransfer.setDragImage(ghost, 16, 16);
+      // Cleanup after browser captures the image
+      requestAnimationFrame(() => ghost.remove());
+
+      // 5. Start drag in context (for validation and execution)
       startFileDrag(itemsToDrag, currentPath);
     },
     [selectedPaths, entries, currentPath, startFileDrag]
   );
 
-  // Handle drag entering a directory
+  // Handle native drag entering a directory (for drop target highlighting)
   const handleDragEnter = useCallback(
-    (entry: FileEntry) => {
-      if (entry.isDirectory && isDragDropActive) {
+    (entry: FileEntry, e: React.DragEvent) => {
+      e.preventDefault();
+      nativeDragEnter(entry.path, entry.isDirectory);
+
+      if (entry.isDirectory && dragCounter.current === 1) {
         setDropTarget(entry.path, true);
       }
     },
-    [isDragDropActive, setDropTarget]
+    [nativeDragEnter, dragCounter, setDropTarget]
+  );
+
+  // Handle native drag over (required to allow drop)
+  const handleDragOver = useCallback(
+    (_entry: FileEntry, e: React.DragEvent) => {
+      e.preventDefault();
+      // Set copy/move based on Alt key
+      e.dataTransfer.dropEffect = e.altKey ? 'copy' : 'move';
+    },
+    []
+  );
+
+  // Handle native drag leave
+  const handleDragLeave = useCallback(
+    (entry: FileEntry, _e: React.DragEvent) => {
+      nativeDragLeave();
+
+      if (entry.isDirectory && dragCounter.current === 0) {
+        setDropTarget(null, false);
+      }
+    },
+    [nativeDragLeave, dragCounter, setDropTarget]
   );
 
   // Handle dropping on a directory
   const handleDrop = useCallback(
-    async (entry: FileEntry) => {
-      if (entry.isDirectory && isDragDropActive) {
-        setDropTarget(entry.path, true);
-        await executeDrop();
+    async (entry: FileEntry, e: React.DragEvent) => {
+      e.preventDefault();
+      console.log('[FileGridView] handleDrop:', { path: entry.path, isDirectory: entry.isDirectory });
+      nativeDragDrop();
+
+      if (entry.isDirectory) {
+        // Pass target path directly to avoid async state timing issues
+        const result = await executeDrop(entry.path);
+        console.log('[FileGridView] executeDrop result:', result);
+        setDropTarget(null, false);
       }
     },
-    [isDragDropActive, setDropTarget, executeDrop]
+    [nativeDragDrop, executeDrop, setDropTarget]
   );
 
   // Clear drop target when mouse leaves
@@ -625,9 +685,11 @@ export function FileGridView({ entries }: FileGridViewProps) {
             onContextMenu={(e) => handleContextMenu(entry, e)}
             onRenameConfirm={(newName) => handleRenameConfirm(entry.path, newName)}
             onRenameCancel={handleRenameCancel}
-            onDragStart={() => handleDragStart(entry)}
-            onDragEnter={() => handleDragEnter(entry)}
-            onDrop={() => handleDrop(entry)}
+            onDragStart={(e) => handleDragStart(entry, e)}
+            onDragEnter={(e) => handleDragEnter(entry, e)}
+            onDragOver={(e) => handleDragOver(entry, e)}
+            onDragLeave={(e) => handleDragLeave(entry, e)}
+            onDrop={(e) => handleDrop(entry, e)}
           />
         ))}
       </div>

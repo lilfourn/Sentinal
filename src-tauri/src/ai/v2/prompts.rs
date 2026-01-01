@@ -86,8 +86,18 @@ file.vector_similarity('tax document') > 0.7
 1. **Use bulk rules** - One rule can match hundreds of files
 2. **Semantic search first** - Understand the content before creating rules
 3. **Always preview** - Never commit without previewing
-4. **Simple folder structure** - Max 2 levels deep
-5. **Clear naming** - Use descriptive folder names
+4. **Simple folder structure** - Max 2-3 levels deep
+5. **CONTENT-SPECIFIC NAMING** - Never use generic names like "Documents" or "Contracts"
+
+## FOLDER NAMING: CONTENT-SPECIFIC REQUIRED
+
+**BAD (Generic):** "Documents/", "Contracts/", "Images/", "Reports/"
+**GOOD (Specific):** "Smith-Project-Contracts/", "2024-Q3-Site-Photos/", "Highland-Ave-Permits/"
+
+Always derive folder names from the ACTUAL content:
+- Extract project names, client names, property addresses from file names
+- Include time periods when relevant (e.g., "2024-Q3")
+- Combine document type with subject (e.g., "Phase-2-Construction-Contracts" not just "Contracts")
 
 ## OPERATION TYPES
 
@@ -278,17 +288,31 @@ file.size > 100MB                                   // Large files
 
 ## WORKFLOW FOR LARGE FOLDERS
 
-1. **Review Statistics** - Look at extension breakdown
-2. **Write Broad Rules** - Start with extension-based rules
-3. **Preview Coverage** - Check how many files matched
-4. **Commit** - When coverage is sufficient
+1. **Review Statistics** - Look at extension breakdown AND file name patterns
+2. **Extract Key Identifiers** - Look for project names, dates, client names in file names
+3. **Write Broad Rules** - Extension-based rules with SPECIFIC destination folders
+4. **Preview Coverage** - Check how many files matched
+5. **Commit** - When coverage is sufficient
+
+## FOLDER NAMING: CONTENT-SPECIFIC REQUIRED
+
+**CRITICAL: Never use generic folder names!**
+
+**BAD:** "Images/", "Documents/", "PDFs/", "Reports/"
+**GOOD:** "Site-Progress-Photos/", "Permit-Applications/", "Johnson-Property-Documents/"
+
+Derive folder names from patterns you see in the file names:
+- Project codes or names (e.g., "PRJ-2024-001" → "Project-2024-001/")
+- Property/location identifiers (e.g., "123-Main-St" → "123-Main-St/")
+- Client/vendor names (e.g., "acme-" prefix → "Acme-Corp/")
+- Date ranges (e.g., files from 2024 → include "2024" in folder name)
 
 ## IMPORTANT
 
 - DO NOT query_semantic_index for large folders (too slow)
-- Focus on EXTENSION and SIZE based rules
+- Focus on EXTENSION and SIZE based rules BUT with SPECIFIC folder destinations
 - One iteration should cover 50%+ of files
-- Uncovered files (<5%) go to "Misc/Unsorted"
+- Uncovered files (<5%) go to "Unsorted"
 "#;
 
 /// Build V4 context for sampled large folders
@@ -404,11 +428,21 @@ Rule: `file.ext == 'pdf' AND file.name.startsWith('Invoice_')`
 Example Input: `screenshot_[001..999].png (999 files)`
 Rule: `file.ext == 'png' AND file.name.startsWith('screenshot_')`
 
-### For Extension-Based Organization
-Use broad extension rules to maximize coverage:
-- `file.ext IN ['jpg', 'jpeg', 'png', 'gif', 'webp']` → "Images/"
-- `file.ext IN ['mp4', 'mov', 'avi', 'mkv']` → "Videos/"
-- `file.ext IN ['pdf', 'doc', 'docx', 'txt']` → "Documents/"
+### For Extension-Based Organization (WITH SPECIFIC NAMES)
+Use broad extension rules BUT with CONTENT-SPECIFIC folder names:
+
+**BAD (Generic):**
+- `file.ext IN ['jpg', 'png']` → "Images/"  ❌
+
+**GOOD (Content-Specific):**
+- `file.ext IN ['jpg', 'png'] AND file.name.contains('site')` → "Construction-Site-Photos/"
+- `file.ext == 'pdf' AND file.name.contains('permit')` → "Building-Permits/"
+- `file.ext IN ['doc', 'docx'] AND file.name.startsWith('contract')` → "Vendor-Contracts/"
+
+Derive folder names from the PATTERNS you see:
+- Pattern `IMG_[0001..5000].jpg` with dates in 2024 → "2024-Photo-Archive/"
+- Pattern `Invoice_[2020..2024].pdf` → "Invoices-2020-2024/"
+- Pattern `Contract_Acme_[001..050].pdf` → "Acme-Corp-Contracts/"
 
 ## AVAILABLE TOOLS
 
@@ -431,8 +465,20 @@ Use broad extension rules to maximize coverage:
 1. **Trust the pattern ranges** - Don't ask to list individual files
 2. **Write broad rules** - Match patterns with startsWith() or extension checks
 3. **Patterns may overlap** - Same files might match multiple patterns
-4. **Outliers need individual rules** - Or move to "Misc/Unsorted"
+4. **Outliers need individual rules** - Or move to "Unsorted"
 5. **Coverage is key** - Target 95%+ before committing
+6. **CONTENT-SPECIFIC FOLDER NAMES** - Extract project/client/property names from patterns
+
+## FOLDER NAMING: CRITICAL
+
+**NEVER use generic names** like "Images/", "Documents/", "PDFs/".
+
+**ALWAYS derive specific names from the patterns:**
+- See `Invoice_Acme_[001..100].pdf` → "Acme-Corp-Invoices/"
+- See `Site_Photo_[0001..5000].jpg` from 2024 → "2024-Site-Progress-Photos/"
+- See `Contract_Phase2_[01..25].pdf` → "Phase-2-Contracts/"
+
+Look at the prefix patterns and file names to extract meaningful identifiers.
 
 ## WORKFLOW
 

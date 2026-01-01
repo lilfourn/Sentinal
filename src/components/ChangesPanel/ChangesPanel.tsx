@@ -20,6 +20,7 @@ import {
   type ThoughtType,
 } from '../../stores/organize-store';
 import { ConventionSelector } from './ConventionSelector';
+import { ContentAnalysisDialog } from './ContentAnalysisDialog';
 import { InstructionInput } from './InstructionInput';
 import { DynamicStatus } from './DynamicStatus';
 import { SimulationControls } from './SimulationControls';
@@ -55,6 +56,19 @@ export function ChangesPanel() {
   } = useOrganizeStore();
 
   const scrollRef = useRef<HTMLDivElement>(null);
+
+  // Track whether content analysis has been completed or skipped
+  const [contentAnalysisComplete, setContentAnalysisComplete] = useState(false);
+
+  // Reset content analysis state when a new folder is opened
+  useEffect(() => {
+    if (isOpen && targetFolder) {
+      setContentAnalysisComplete(false);
+    }
+  }, [isOpen, targetFolder]);
+
+  // Show content analysis dialog when awaiting instruction and analysis not done
+  const showContentAnalysis = awaitingInstruction && !contentAnalysisComplete && targetFolder;
 
   // Auto-scroll to bottom when new thoughts arrive
   useEffect(() => {
@@ -110,8 +124,17 @@ export function ChangesPanel() {
             />
           ))}
 
-          {/* V6: User Instruction Input */}
-          {awaitingInstruction && (
+          {/* Content Analysis Dialog - shown before instruction input */}
+          {showContentAnalysis && targetFolder && (
+            <ContentAnalysisDialog
+              folderPath={targetFolder}
+              onComplete={() => setContentAnalysisComplete(true)}
+              onSkip={() => setContentAnalysisComplete(true)}
+            />
+          )}
+
+          {/* V6: User Instruction Input - shown after content analysis */}
+          {awaitingInstruction && contentAnalysisComplete && (
             <InstructionInput
               instruction={userInstruction}
               onInstructionChange={setUserInstruction}

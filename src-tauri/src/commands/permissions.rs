@@ -1,3 +1,5 @@
+use crate::security::ShellPermissions;
+use serde::{Deserialize, Serialize};
 use std::path::Path;
 
 /// Check if a path is accessible (can we read it?)
@@ -58,4 +60,64 @@ pub async fn open_privacy_settings() -> Result<(), String> {
             .map_err(|e| format!("Failed to open System Preferences: {}", e))?;
     }
     Ok(())
+}
+
+// ============================================================================
+// Shell Command Permissions
+// ============================================================================
+
+/// Response for shell permissions
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ShellPermissionsResponse {
+    pub allowed_commands: Vec<String>,
+    pub allowed_patterns: Vec<String>,
+    pub denied_commands: Vec<String>,
+}
+
+/// Get current shell permissions
+#[tauri::command]
+pub fn get_shell_permissions() -> ShellPermissionsResponse {
+    let perms = ShellPermissions::load();
+    ShellPermissionsResponse {
+        allowed_commands: perms.allowed_commands,
+        allowed_patterns: perms.allowed_patterns,
+        denied_commands: perms.denied_commands,
+    }
+}
+
+/// Allow a specific shell command (one-time or pattern)
+#[tauri::command]
+pub fn allow_shell_command(command: String, as_pattern: bool) -> Result<(), String> {
+    let mut perms = ShellPermissions::load();
+
+    if as_pattern {
+        // Convert command to pattern (e.g., "find ~ -iname foo" -> "find *")
+        let pattern = command
+            .split_whitespace()
+            .next()
+            .map(|cmd| format!("{} *", cmd))
+            .unwrap_or_else(|| command.clone());
+        perms.allow_pattern(&pattern);
+        eprintln!("[Permissions] Added pattern: {}", pattern);
+    } else {
+        perms.allow_command(&command);
+        eprintln!("[Permissions] Added command: {}", command);
+    }
+
+    perms.save()
+}
+
+/// Revoke a previously allowed shell command
+#[tauri::command]
+pub fn revoke_shell_command(command: String) -> Result<(), String> {
+    let mut perms = ShellPermissions::load();
+    perms.revoke_command(&command);
+    perms.save()
+}
+
+/// Check if a shell command is allowed
+#[tauri::command]
+pub fn check_shell_command(command: String) -> bool {
+    let perms = ShellPermissions::load();
+    perms.is_allowed(&command)
 }

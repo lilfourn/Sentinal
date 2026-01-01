@@ -62,44 +62,52 @@ impl WALOperationType {
     ///
     /// Returns an operation that, when executed, will reverse the effect
     /// of the original operation. This is used for rollback scenarios.
-    pub fn inverse(&self) -> WALOperationType {
+    ///
+    /// # Returns
+    /// * `Ok(WALOperationType)` - The inverse operation
+    /// * `Err(String)` - Error if inverse cannot be computed (e.g., invalid paths)
+    pub fn inverse(&self) -> Result<WALOperationType, String> {
         match self {
             WALOperationType::CreateFolder { path } => {
                 // Inverse of create is delete
-                WALOperationType::DeleteFolder { path: path.clone() }
+                Ok(WALOperationType::DeleteFolder { path: path.clone() })
             }
             WALOperationType::Move {
                 source,
                 destination,
             } => {
                 // Inverse of move is move back
-                WALOperationType::Move {
+                Ok(WALOperationType::Move {
                     source: destination.clone(),
                     destination: source.clone(),
-                }
+                })
             }
             WALOperationType::Rename { path, new_name } => {
                 // Inverse of rename requires the old name
                 // We derive the old name from the current path
                 let old_name = path
                     .file_name()
-                    .map(|n| n.to_string_lossy().to_string())
-                    .unwrap_or_default();
-                let new_path = path.parent().map(|p| p.join(new_name)).unwrap_or_default();
-                WALOperationType::Rename {
+                    .ok_or_else(|| format!("Cannot compute inverse: path has no filename: {}", path.display()))?
+                    .to_string_lossy()
+                    .to_string();
+                let parent = path
+                    .parent()
+                    .ok_or_else(|| format!("Cannot compute inverse: path has no parent: {}", path.display()))?;
+                let new_path = parent.join(new_name);
+                Ok(WALOperationType::Rename {
                     path: new_path,
                     new_name: old_name,
-                }
+                })
             }
             WALOperationType::Quarantine {
                 path,
                 quarantine_path,
             } => {
                 // Inverse of quarantine is move back from quarantine
-                WALOperationType::Move {
+                Ok(WALOperationType::Move {
                     source: quarantine_path.clone(),
                     destination: path.clone(),
-                }
+                })
             }
             WALOperationType::Copy {
                 source: _,
@@ -108,16 +116,25 @@ impl WALOperationType {
                 // Inverse of copy is delete the destination
                 // Note: We use DeleteFolder for directories, for files
                 // the executor should handle appropriately
-                WALOperationType::DeleteFolder {
+                Ok(WALOperationType::DeleteFolder {
                     path: destination.clone(),
-                }
+                })
             }
             WALOperationType::DeleteFolder { path } => {
                 // Cannot truly undo a delete without backup
                 // Return a no-op equivalent (create same folder)
-                WALOperationType::CreateFolder { path: path.clone() }
+                Ok(WALOperationType::CreateFolder { path: path.clone() })
             }
         }
+    }
+
+    /// Generate inverse operation without error checking (panics on invalid paths)
+    ///
+    /// For use in contexts where path validity has already been verified.
+    /// Prefer `inverse()` for new code.
+    #[allow(dead_code)]
+    pub fn inverse_unchecked(&self) -> WALOperationType {
+        self.inverse().expect("inverse_unchecked called on invalid operation")
     }
 
     /// Get a human-readable description of this operation
@@ -184,10 +201,14 @@ pub struct WALEntry {
 
 impl WALEntry {
     /// Create a new WAL entry with the given operation
-    pub fn new(operation: WALOperationType, sequence: u32) -> Self {
-        let undo_operation = operation.inverse();
+    ///
+    /// # Returns
+    /// * `Ok(WALEntry)` - The created entry
+    /// * `Err(String)` - Error if inverse operation cannot be computed
+    pub fn new(operation: WALOperationType, sequence: u32) -> Result<Self, String> {
+        let undo_operation = operation.inverse()?;
         let now = Utc::now();
-        Self {
+        Ok(Self {
             id: Uuid::new_v4(),
             sequence,
             operation,
@@ -197,18 +218,22 @@ impl WALEntry {
             updated_at: now,
             error: None,
             depends_on: Vec::new(),
-        }
+        })
     }
 
     /// Create a new WAL entry with dependencies
+    ///
+    /// # Returns
+    /// * `Ok(WALEntry)` - The created entry
+    /// * `Err(String)` - Error if inverse operation cannot be computed
     pub fn new_with_deps(
         operation: WALOperationType,
         sequence: u32,
         depends_on: Vec<Uuid>,
-    ) -> Self {
-        let mut entry = Self::new(operation, sequence);
+    ) -> Result<Self, String> {
+        let mut entry = Self::new(operation, sequence)?;
         entry.depends_on = depends_on;
-        entry
+        Ok(entry)
     }
 
     /// Mark this entry as in progress
@@ -288,25 +313,33 @@ impl WALJournal {
     }
 
     /// Add a new operation and return its ID
-    pub fn add_operation(&mut self, operation: WALOperationType) -> Uuid {
+    ///
+    /// # Returns
+    /// * `Ok(Uuid)` - The ID of the created entry
+    /// * `Err(String)` - Error if inverse operation cannot be computed
+    pub fn add_operation(&mut self, operation: WALOperationType) -> Result<Uuid, String> {
         let sequence = self.entries.len() as u32;
-        let entry = WALEntry::new(operation, sequence);
+        let entry = WALEntry::new(operation, sequence)?;
         let id = entry.id;
         self.entries.push(entry);
-        id
+        Ok(id)
     }
 
     /// Add a new operation with dependencies
+    ///
+    /// # Returns
+    /// * `Ok(Uuid)` - The ID of the created entry
+    /// * `Err(String)` - Error if inverse operation cannot be computed
     pub fn add_operation_with_deps(
         &mut self,
         operation: WALOperationType,
         depends_on: Vec<Uuid>,
-    ) -> Uuid {
+    ) -> Result<Uuid, String> {
         let sequence = self.entries.len() as u32;
-        let entry = WALEntry::new_with_deps(operation, sequence, depends_on);
+        let entry = WALEntry::new_with_deps(operation, sequence, depends_on)?;
         let id = entry.id;
         self.entries.push(entry);
-        id
+        Ok(id)
     }
 
     /// Find an entry by its ID
@@ -387,7 +420,7 @@ mod tests {
         let op = WALOperationType::CreateFolder {
             path: PathBuf::from("/test/folder"),
         };
-        let inverse = op.inverse();
+        let inverse = op.inverse().unwrap();
         assert!(matches!(inverse, WALOperationType::DeleteFolder { .. }));
     }
 
@@ -397,7 +430,7 @@ mod tests {
             source: PathBuf::from("/src"),
             destination: PathBuf::from("/dst"),
         };
-        let inverse = op.inverse();
+        let inverse = op.inverse().unwrap();
         if let WALOperationType::Move {
             source,
             destination,
@@ -411,11 +444,23 @@ mod tests {
     }
 
     #[test]
+    fn test_rename_inverse_error_no_filename() {
+        // Root path has no filename
+        let op = WALOperationType::Rename {
+            path: PathBuf::from("/"),
+            new_name: "new".to_string(),
+        };
+        let result = op.inverse();
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("no filename"));
+    }
+
+    #[test]
     fn test_journal_add_operation() {
         let mut journal = WALJournal::new("test-job".to_string(), PathBuf::from("/test"));
         let id = journal.add_operation(WALOperationType::CreateFolder {
             path: PathBuf::from("/test/new"),
-        });
+        }).unwrap();
         assert_eq!(journal.entries.len(), 1);
         assert!(journal.get_entry(id).is_some());
     }
@@ -427,7 +472,7 @@ mod tests {
                 path: PathBuf::from("/test"),
             },
             0,
-        );
+        ).unwrap();
         assert_eq!(entry.status, WALStatus::Pending);
 
         entry.mark_in_progress();

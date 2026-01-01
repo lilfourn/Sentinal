@@ -639,7 +639,8 @@ where
                             new_name: op.new_name.clone(),
                         })
                         .collect(),
-                    target_folder: target_folder.to_string_lossy().to_string(),
+                    // organization_root is the target folder - all organization stays within it
+                    target_folder: vfs.organization_root().to_string_lossy().to_string(),
                 };
                 return Ok(plan);
             }
@@ -911,7 +912,8 @@ where
                     new_name: op.new_name.clone(),
                 })
                 .collect(),
-            target_folder: target_folder.to_string_lossy().to_string(),
+            // organization_root is the target folder - all organization stays within it
+            target_folder: vfs.organization_root().to_string_lossy().to_string(),
         };
 
         event_emitter("committing", &format!("Plan ready: {} operations", plan.operations.len()), Some(vec![
@@ -1252,7 +1254,8 @@ where
                     new_name: op.new_name.clone(),
                 })
                 .collect(),
-            target_folder: target_folder.to_string_lossy().to_string(),
+            // organization_root is the target folder - all organization stays within it
+            target_folder: vfs.organization_root().to_string_lossy().to_string(),
         };
 
         event_emitter(

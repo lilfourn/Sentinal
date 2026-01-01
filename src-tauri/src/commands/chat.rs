@@ -63,15 +63,20 @@ pub struct ChatStreamResponse {
 /// - chat:thought - { id, tool, input?, output?, status } - tool usage
 /// - chat:complete - {} - finished
 /// - chat:error - { message } - error occurred
+/// - chat:aborted - { reason: string } - aborted by user
 #[tauri::command]
 pub async fn chat_stream(
     app: AppHandle,
+    abort_flag: State<'_, ChatAbortFlag>,
     request: ChatStreamRequest,
 ) -> Result<ChatStreamResponse, String> {
     eprintln!("[ChatCommand] Starting chat_stream");
     eprintln!("[ChatCommand] Model: {}", request.model);
     eprintln!("[ChatCommand] Context items: {}", request.context_items.len());
     eprintln!("[ChatCommand] History length: {}", request.history.len());
+
+    // Reset abort flag at start of new chat
+    abort_flag.0.store(false, std::sync::atomic::Ordering::SeqCst);
 
     // Map to Anthropic model aliases (or use full IDs)
     let model_id = match request.model.as_str() {
@@ -81,6 +86,9 @@ pub async fn chat_stream(
         _ => &request.model,
     };
 
+    // Clone the abort flag Arc for passing to agent
+    let abort_flag_arc = Some(Arc::clone(&abort_flag.0));
+
     match run_chat_agent(
         &app,
         &request.message,
@@ -88,6 +96,7 @@ pub async fn chat_stream(
         model_id,
         &request.history,
         request.extended_thinking,
+        abort_flag_arc,
     )
     .await
     {

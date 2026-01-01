@@ -1,5 +1,5 @@
-import { useState, useRef, useEffect, KeyboardEvent, useMemo, useCallback } from 'react';
-import { ArrowUp, StopCircle, Plus, ChevronDown, Brain } from 'lucide-react';
+import { useState, useRef, useEffect, KeyboardEvent, useCallback } from 'react';
+import { ArrowUp, StopCircle, Plus, ChevronDown, Brain, X } from 'lucide-react';
 import { invoke } from '@tauri-apps/api/core';
 import { useChatStore, type ChatModel, type MentionItem, getContextStrategy } from '../../stores/chat-store';
 import { useNavigationStore } from '../../stores/navigation-store';
@@ -11,17 +11,8 @@ const MODEL_OPTIONS: { value: ChatModel; label: string }[] = [
   { value: 'claude-opus-4-5', label: 'Opus 4.5' },
 ];
 
-// Debounce helper
-function debounce<T extends (...args: Parameters<T>) => void>(
-  fn: T,
-  delay: number
-): (...args: Parameters<T>) => void {
-  let timeoutId: ReturnType<typeof setTimeout>;
-  return (...args: Parameters<T>) => {
-    clearTimeout(timeoutId);
-    timeoutId = setTimeout(() => fn(...args), delay);
-  };
-}
+// Debounce search delay
+const MENTION_SEARCH_DEBOUNCE_MS = 150;
 
 // Extract mention query from text at cursor position
 function extractMentionQuery(text: string, cursorPos: number): { query: string; startIndex: number } | null {
@@ -46,6 +37,10 @@ export function ChatInput() {
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
 
+  // Refs for debounce cleanup and search race condition prevention
+  const debounceTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const searchSequenceRef = useRef(0);
+
   const currentPath = useNavigationStore((s) => s.currentPath);
 
   const {
@@ -53,6 +48,7 @@ export function ChatInput() {
     abort,
     status,
     activeContext,
+    removeContext,
     model,
     setModel,
     extendedThinking,
@@ -75,10 +71,28 @@ export function ChatInput() {
 
   const isProcessing = status === 'thinking' || status === 'streaming';
 
-  // Debounced search function
-  const debouncedSearch = useMemo(
-    () =>
-      debounce(async (query: string, directory: string) => {
+  // Cleanup debounce timeout on unmount
+  useEffect(() => {
+    return () => {
+      if (debounceTimeoutRef.current) {
+        clearTimeout(debounceTimeoutRef.current);
+        debounceTimeoutRef.current = null;
+      }
+    };
+  }, []);
+
+  // Debounced search function with race condition protection
+  const debouncedSearch = useCallback(
+    (query: string, directory: string) => {
+      // Clear any pending debounce
+      if (debounceTimeoutRef.current) {
+        clearTimeout(debounceTimeoutRef.current);
+      }
+
+      debounceTimeoutRef.current = setTimeout(async () => {
+        // Increment sequence to track this specific search
+        const currentSequence = ++searchSequenceRef.current;
+
         try {
           setMentionLoading(true);
 
@@ -89,6 +103,11 @@ export function ChatInput() {
             limit: 15,
           });
 
+          // Check if this search is still current (no newer search started)
+          if (currentSequence !== searchSequenceRef.current) {
+            return; // Stale result, discard
+          }
+
           // If few results, also search home directory
           const homeDir = await invoke<string>('get_home_dir').catch(() => null);
           if (results.length < 5 && homeDir && directory !== homeDir) {
@@ -97,6 +116,12 @@ export function ChatInput() {
               query: query || null,
               limit: 10,
             });
+
+            // Check again after second async operation
+            if (currentSequence !== searchSequenceRef.current) {
+              return; // Stale result, discard
+            }
+
             // Dedupe and merge
             const seen = new Set(results.map((r) => r.path));
             results = [...results, ...homeResults.filter((r) => !seen.has(r.path))];
@@ -105,10 +130,14 @@ export function ChatInput() {
           setMentionResults(results.slice(0, 15));
           resetMentionSelection();
         } catch (err) {
-          console.error('Mention search failed:', err);
-          setMentionResults([]);
+          // Only log error if this search is still current
+          if (currentSequence === searchSequenceRef.current) {
+            console.error('Mention search failed:', err);
+            setMentionResults([]);
+          }
         }
-      }, 150),
+      }, MENTION_SEARCH_DEBOUNCE_MS);
+    },
     [setMentionLoading, setMentionResults, resetMentionSelection]
   );
 
@@ -243,8 +272,29 @@ export function ChatInput() {
         {/* Inline mention dropdown */}
         <InlineMentionDropdown anchorRef={containerRef} onSelect={handleMentionSelect} />
 
+        {/* Context chips - inline above textarea */}
+        {activeContext.length > 0 && (
+          <div className="px-3 pt-3 pb-1 flex flex-wrap gap-1.5">
+            {activeContext.map((item) => (
+              <div
+                key={item.id}
+                className="flex items-center gap-1.5 pl-2 pr-1 py-0.5 bg-white/[0.06] rounded text-[11px] text-gray-400 group"
+              >
+                <span className="truncate max-w-[120px]">{item.name}</span>
+                <button
+                  onClick={() => removeContext(item.id)}
+                  className="p-0.5 rounded hover:bg-white/10 text-gray-500 hover:text-gray-300 opacity-60 group-hover:opacity-100 transition-opacity"
+                  aria-label={`Remove ${item.name}`}
+                >
+                  <X size={10} />
+                </button>
+              </div>
+            ))}
+          </div>
+        )}
+
         {/* Textarea area */}
-        <div className="px-4 pt-3 pb-2">
+        <div className={`px-4 ${activeContext.length > 0 ? 'pt-1' : 'pt-3'} pb-2`}>
           <textarea
             ref={textareaRef}
             value={input}
@@ -258,6 +308,8 @@ export function ChatInput() {
             className="w-full resize-none bg-transparent text-sm text-gray-100 placeholder-gray-500 focus:outline-none min-h-[24px] max-h-[120px]"
             rows={1}
             disabled={isProcessing}
+            aria-label="Chat message input"
+            aria-describedby={activeContext.length > 0 ? 'context-hint' : undefined}
           />
         </div>
 
@@ -270,8 +322,9 @@ export function ChatInput() {
               onClick={handlePlusClick}
               className="p-2 rounded-lg hover:bg-white/10 text-gray-400 hover:text-gray-200 transition-colors"
               title="Add file or folder context (@)"
+              aria-label="Add file or folder context"
             >
-              <Plus size={18} />
+              <Plus size={18} aria-hidden="true" />
             </button>
 
             {/* Extended thinking toggle */}
@@ -283,9 +336,11 @@ export function ChatInput() {
                   : 'hover:bg-white/10 text-gray-400 hover:text-gray-200'
               }`}
               title={extendedThinking ? 'Extended thinking enabled' : 'Extended thinking disabled'}
+              aria-label={extendedThinking ? 'Disable extended thinking' : 'Enable extended thinking'}
+              aria-pressed={extendedThinking}
               disabled={isProcessing}
             >
-              <Brain size={18} />
+              <Brain size={18} aria-hidden="true" />
             </button>
           </div>
 
@@ -298,6 +353,7 @@ export function ChatInput() {
                 onChange={(e) => setModel(e.target.value as ChatModel)}
                 className="appearance-none text-xs text-gray-400 bg-transparent pr-5 pl-2 py-1 focus:outline-none cursor-pointer hover:text-gray-200 transition-colors"
                 disabled={isProcessing}
+                aria-label="Select AI model"
               >
                 {MODEL_OPTIONS.map((opt) => (
                   <option key={opt.value} value={opt.value} className="bg-[#2a2a2a] text-gray-200">
@@ -305,7 +361,7 @@ export function ChatInput() {
                   </option>
                 ))}
               </select>
-              <ChevronDown size={12} className="absolute right-0 top-1/2 -translate-y-1/2 text-gray-500 pointer-events-none" />
+              <ChevronDown size={12} className="absolute right-0 top-1/2 -translate-y-1/2 text-gray-500 pointer-events-none" aria-hidden="true" />
             </div>
 
             {/* Send/Stop button */}
@@ -314,8 +370,9 @@ export function ChatInput() {
                 onClick={abort}
                 className="p-2 rounded-lg bg-red-500/80 hover:bg-red-500 text-white transition-colors"
                 title="Stop generation"
+                aria-label="Stop generation"
               >
-                <StopCircle size={18} />
+                <StopCircle size={18} aria-hidden="true" />
               </button>
             ) : (
               <button
@@ -323,8 +380,9 @@ export function ChatInput() {
                 disabled={!input.trim()}
                 className="p-2 rounded-lg bg-orange-600/80 hover:bg-orange-600 disabled:bg-gray-700 disabled:text-gray-500 disabled:cursor-not-allowed text-white transition-colors"
                 title="Send message"
+                aria-label="Send message"
               >
-                <ArrowUp size={18} />
+                <ArrowUp size={18} aria-hidden="true" />
               </button>
             )}
           </div>

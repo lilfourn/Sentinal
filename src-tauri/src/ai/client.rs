@@ -1,5 +1,6 @@
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
+use std::time::Duration;
 
 use super::credentials::CredentialManager;
 
@@ -124,7 +125,10 @@ pub struct AnthropicClient {
 impl AnthropicClient {
     pub fn new() -> Self {
         Self {
-            client: Client::new(),
+            client: Client::builder()
+                .timeout(Duration::from_secs(120))
+                .build()
+                .expect("Failed to create HTTP client"),
         }
     }
 
@@ -256,7 +260,10 @@ impl AnthropicClient {
 
     /// Validate API key by making a minimal request
     pub async fn validate_api_key(api_key: &str) -> Result<bool, String> {
-        let client = Client::new();
+        let client = Client::builder()
+            .timeout(Duration::from_secs(30)) // Shorter timeout for validation
+            .build()
+            .map_err(|e| format!("Failed to create HTTP client: {}", e))?;
 
         let request = ApiRequest {
             model: ClaudeModel::Haiku.as_str().to_string(),

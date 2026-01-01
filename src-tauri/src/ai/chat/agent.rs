@@ -15,6 +15,8 @@ use futures::StreamExt;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 use tauri::{AppHandle, Emitter};
 use tokio::time::sleep;
@@ -75,6 +77,7 @@ enum StreamEvent {
 /// * `model` - Model ID ("claude-haiku-4-5" or "claude-sonnet-4-5")
 /// * `history` - Previous conversation messages
 /// * `extended_thinking` - Whether to enable extended thinking mode
+/// * `abort_flag` - Optional flag to signal abort request
 ///
 /// # Events Emitted
 /// * `chat:thought` - Tool usage
@@ -82,6 +85,7 @@ enum StreamEvent {
 /// * `chat:thinking` - Extended thinking content (if enabled)
 /// * `chat:complete` - Finished
 /// * `chat:error` - Error occurred
+/// * `chat:aborted` - Aborted by user
 pub async fn run_chat_agent(
     app: &AppHandle,
     message: &str,
@@ -89,9 +93,25 @@ pub async fn run_chat_agent(
     model: &str,
     history: &[ConversationMessage],
     extended_thinking: bool,
+    abort_flag: Option<Arc<AtomicBool>>,
 ) -> Result<String, String> {
     eprintln!("[ChatAgent] Starting with model: {}", model);
     eprintln!("[ChatAgent] Context items: {}", context_items.len());
+
+    // Helper to check if abort was requested
+    let is_aborted = || -> bool {
+        abort_flag
+            .as_ref()
+            .map(|f| f.load(Ordering::SeqCst))
+            .unwrap_or(false)
+    };
+
+    // Check abort at start
+    if is_aborted() {
+        eprintln!("[ChatAgent] Aborted before starting");
+        app.emit("chat:aborted", json!({"reason": "User requested abort"})).ok();
+        return Ok(String::new());
+    }
 
     // 1. Get API key
     let api_key = CredentialManager::get_api_key("anthropic")?;
@@ -108,13 +128,23 @@ pub async fn run_chat_agent(
     // 5. Get available tools
     let tools = get_chat_tools();
 
-    // 6. Create HTTP client
-    let client = Client::new();
+    // 6. Create HTTP client with timeout
+    let client = Client::builder()
+        .timeout(Duration::from_secs(120))
+        .build()
+        .map_err(|e| format!("Failed to create HTTP client: {}", e))?;
 
     // 7. ReAct Loop with streaming
     let mut final_response = String::new();
 
     for iteration in 0..MAX_ITERATIONS {
+        // Check abort at start of each iteration
+        if is_aborted() {
+            eprintln!("[ChatAgent] Aborted at iteration {}", iteration + 1);
+            app.emit("chat:aborted", json!({"reason": "User requested abort"})).ok();
+            return Ok(final_response);
+        }
+
         eprintln!(
             "[ChatAgent] Iteration {}/{}",
             iteration + 1,

@@ -1,15 +1,62 @@
-import { useState } from 'react';
+import { useState, memo } from 'react';
 import Markdown from 'react-markdown';
 import { Copy, ThumbsUp, ThumbsDown, RotateCcw, Brain, ChevronRight } from 'lucide-react';
 import type { ChatMessage } from '../../stores/chat-store';
 import { ThoughtAccordion } from './ThoughtAccordion';
 import { StreamingIndicator, ThinkingDots, ShimmerText } from './StreamingIndicator';
 
+// Allowed URL protocols to prevent XSS via javascript: URLs
+const ALLOWED_URL_PROTOCOLS = ['http:', 'https:', 'mailto:', 'tel:'];
+
+/**
+ * Sanitize URL to prevent XSS attacks
+ * Returns the URL if safe, undefined if dangerous
+ */
+function sanitizeUrl(url: string | undefined): string | undefined {
+  if (!url) return undefined;
+
+  const trimmed = url.trim();
+
+  // Allow relative URLs (no protocol)
+  if (!trimmed.includes(':')) return url;
+
+  // Check against allowlist
+  const lowerUrl = trimmed.toLowerCase();
+  for (const protocol of ALLOWED_URL_PROTOCOLS) {
+    if (lowerUrl.startsWith(protocol)) {
+      return url;
+    }
+  }
+
+  // Block dangerous protocols (javascript:, data:, vbscript:, etc.)
+  return undefined;
+}
+
 interface MessageItemProps {
   message: ChatMessage;
 }
 
-export function MessageItem({ message }: MessageItemProps) {
+/**
+ * Custom comparison function for React.memo
+ * Only re-render if meaningful message properties change
+ */
+function arePropsEqual(prev: MessageItemProps, next: MessageItemProps): boolean {
+  const p = prev.message;
+  const n = next.message;
+
+  return (
+    p.id === n.id &&
+    p.content === n.content &&
+    p.thinking === n.thinking &&
+    p.isStreaming === n.isStreaming &&
+    p.isThinking === n.isThinking &&
+    p.thoughts?.length === n.thoughts?.length &&
+    // Check last thought update (for streaming thoughts)
+    p.thoughts?.[p.thoughts.length - 1]?.output === n.thoughts?.[n.thoughts.length - 1]?.output
+  );
+}
+
+export const MessageItem = memo(function MessageItem({ message }: MessageItemProps) {
   const isUser = message.role === 'user';
   const isAssistant = message.role === 'assistant';
   const [isThinkingExpanded, setIsThinkingExpanded] = useState(false);
@@ -108,17 +155,24 @@ export function MessageItem({ message }: MessageItemProps) {
             {message.content ? (
               <Markdown
                 components={{
-                  // Customize link styling
-                  a: ({ href, children }) => (
-                    <a
-                      href={href}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      className="text-blue-400 hover:underline"
-                    >
-                      {children}
-                    </a>
-                  ),
+                  // Customize link styling with XSS protection
+                  a: ({ href, children }) => {
+                    const safeHref = sanitizeUrl(href);
+                    if (!safeHref) {
+                      // Render as plain text if URL is blocked
+                      return <span className="text-gray-400">{children}</span>;
+                    }
+                    return (
+                      <a
+                        href={safeHref}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="text-blue-400 hover:underline"
+                      >
+                        {children}
+                      </a>
+                    );
+                  },
                   // Code blocks
                   code: ({ className, children }) => {
                     const isInline = !className;
@@ -159,20 +213,23 @@ export function MessageItem({ message }: MessageItemProps) {
             <Copy size={14} />
           </button>
           <button
-            className="p-1.5 rounded hover:bg-white/5 text-gray-500 hover:text-gray-300 transition-colors"
-            title="Good response"
+            disabled
+            className="p-1.5 rounded text-gray-600 cursor-not-allowed opacity-50"
+            title="Coming soon"
           >
             <ThumbsUp size={14} />
           </button>
           <button
-            className="p-1.5 rounded hover:bg-white/5 text-gray-500 hover:text-gray-300 transition-colors"
-            title="Bad response"
+            disabled
+            className="p-1.5 rounded text-gray-600 cursor-not-allowed opacity-50"
+            title="Coming soon"
           >
             <ThumbsDown size={14} />
           </button>
           <button
-            className="p-1.5 rounded hover:bg-white/5 text-gray-500 hover:text-gray-300 transition-colors"
-            title="Regenerate"
+            disabled
+            className="p-1.5 rounded text-gray-600 cursor-not-allowed opacity-50"
+            title="Coming soon"
           >
             <RotateCcw size={14} />
           </button>
@@ -180,4 +237,4 @@ export function MessageItem({ message }: MessageItemProps) {
       )}
     </div>
   );
-}
+}, arePropsEqual);

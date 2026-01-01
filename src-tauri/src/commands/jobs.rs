@@ -40,18 +40,60 @@ pub fn set_job_plan(
         return Err(format!("Job ID mismatch: expected {}, got {}", job.job_id, job_id));
     }
 
-    // Convert operations from JSON
-    let ops: Vec<OrganizeOperation> = operations
-        .into_iter()
-        .map(|op| OrganizeOperation {
-            op_id: op.get("opId").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-            op_type: op.get("type").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+    // Convert operations from JSON with validation
+    let mut ops: Vec<OrganizeOperation> = Vec::with_capacity(operations.len());
+    for (idx, op) in operations.into_iter().enumerate() {
+        let op_id = op
+            .get("opId")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| format!("Operation {} missing required field 'opId'", idx))?
+            .to_string();
+
+        let op_type = op
+            .get("type")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| format!("Operation {} missing required field 'type'", idx))?
+            .to_string();
+
+        // Validate operation-specific required fields
+        match op_type.as_str() {
+            "move" => {
+                if op.get("source").and_then(|v| v.as_str()).filter(|s| !s.is_empty()).is_none() {
+                    return Err(format!("Operation '{}' (move) missing required field 'source'", op_id));
+                }
+                if op.get("destination").and_then(|v| v.as_str()).filter(|s| !s.is_empty()).is_none() {
+                    return Err(format!("Operation '{}' (move) missing required field 'destination'", op_id));
+                }
+            }
+            "create_folder" | "trash" | "quarantine" => {
+                if op.get("path").and_then(|v| v.as_str()).filter(|s| !s.is_empty()).is_none() {
+                    return Err(format!("Operation '{}' ({}) missing required field 'path'", op_id, op_type));
+                }
+            }
+            "rename" => {
+                if op.get("path").and_then(|v| v.as_str()).filter(|s| !s.is_empty()).is_none() {
+                    return Err(format!("Operation '{}' (rename) missing required field 'path'", op_id));
+                }
+                if op.get("newName").and_then(|v| v.as_str()).filter(|s| !s.is_empty()).is_none() {
+                    return Err(format!("Operation '{}' (rename) missing required field 'newName'", op_id));
+                }
+            }
+            _ => {
+                return Err(format!("Operation '{}' has unknown type '{}'", op_id, op_type));
+            }
+        }
+
+        ops.push(OrganizeOperation {
+            op_id,
+            op_type,
             source: op.get("source").and_then(|v| v.as_str()).map(String::from),
             destination: op.get("destination").and_then(|v| v.as_str()).map(String::from),
             path: op.get("path").and_then(|v| v.as_str()).map(String::from),
             new_name: op.get("newName").and_then(|v| v.as_str()).map(String::from),
-        })
-        .collect();
+        });
+    }
 
     let plan = OrganizePlan {
         plan_id,
@@ -157,6 +199,7 @@ pub fn resume_organize_job(job_id: String) -> Result<OrganizeJob, String> {
 ///
 /// V5: Now emits 'execution-progress' events for clean UI updates.
 /// V6: Now accepts conflict_policy for handling destination conflicts.
+/// V7: Now accepts original_folder for post-execution cleanup of empty directories.
 ///
 /// This command:
 /// 1. Converts the OrganizePlan to WAL entries
@@ -164,12 +207,14 @@ pub fn resume_organize_job(job_id: String) -> Result<OrganizeJob, String> {
 /// 3. Executes operations in parallel within each level
 /// 4. Handles destination conflicts according to policy (skip, auto_rename, fail)
 /// 5. Emits progress events after each level completes
-/// 6. Returns the execution result
+/// 6. Cleans up empty directories in the original folder after successful execution
+/// 7. Returns the execution result
 #[tauri::command]
 pub async fn execute_plan_parallel(
     app_handle: AppHandle,
     plan: OrganizePlan,
     conflict_policy: Option<String>,
+    original_folder: Option<String>,
 ) -> Result<ExecutionResult, String> {
     // Parse conflict policy (default to AutoRename for better UX)
     let policy = match conflict_policy.as_deref() {
@@ -202,50 +247,54 @@ pub async fn execute_plan_parallel(
     for op in &plan.operations {
         let wal_op = match op.op_type.as_str() {
             "create_folder" => {
-                if let Some(ref path) = op.path {
-                    WALOperationType::CreateFolder {
-                        path: PathBuf::from(path),
-                    }
-                } else {
-                    continue;
+                let path = op.path.as_ref().ok_or_else(|| {
+                    format!("Operation '{}' (create_folder) missing required field 'path'", op.op_id)
+                })?;
+                WALOperationType::CreateFolder {
+                    path: PathBuf::from(path),
                 }
             }
             "move" => {
-                if let (Some(ref src), Some(ref dst)) = (&op.source, &op.destination) {
-                    WALOperationType::Move {
-                        source: PathBuf::from(src),
-                        destination: PathBuf::from(dst),
-                    }
-                } else {
-                    continue;
+                let src = op.source.as_ref().ok_or_else(|| {
+                    format!("Operation '{}' (move) missing required field 'source'", op.op_id)
+                })?;
+                let dst = op.destination.as_ref().ok_or_else(|| {
+                    format!("Operation '{}' (move) missing required field 'destination'", op.op_id)
+                })?;
+                WALOperationType::Move {
+                    source: PathBuf::from(src),
+                    destination: PathBuf::from(dst),
                 }
             }
             "rename" => {
-                if let (Some(ref path), Some(ref new_name)) = (&op.path, &op.new_name) {
-                    WALOperationType::Rename {
-                        path: PathBuf::from(path),
-                        new_name: new_name.clone(),
-                    }
-                } else {
-                    continue;
+                let path = op.path.as_ref().ok_or_else(|| {
+                    format!("Operation '{}' (rename) missing required field 'path'", op.op_id)
+                })?;
+                let new_name = op.new_name.as_ref().ok_or_else(|| {
+                    format!("Operation '{}' (rename) missing required field 'newName'", op.op_id)
+                })?;
+                WALOperationType::Rename {
+                    path: PathBuf::from(path),
+                    new_name: new_name.clone(),
                 }
             }
             "trash" | "quarantine" => {
-                if let Some(ref path) = op.path {
-                    let quarantine_path = dirs::data_dir()
-                        .unwrap_or_else(|| PathBuf::from("/tmp"))
-                        .join("sentinel")
-                        .join("quarantine")
-                        .join(&op.op_id);
-                    WALOperationType::Quarantine {
-                        path: PathBuf::from(path),
-                        quarantine_path,
-                    }
-                } else {
-                    continue;
+                let path = op.path.as_ref().ok_or_else(|| {
+                    format!("Operation '{}' ({}) missing required field 'path'", op.op_id, op.op_type)
+                })?;
+                let quarantine_path = dirs::data_dir()
+                    .unwrap_or_else(|| PathBuf::from("/tmp"))
+                    .join("sentinel")
+                    .join("quarantine")
+                    .join(&op.op_id);
+                WALOperationType::Quarantine {
+                    path: PathBuf::from(path),
+                    quarantine_path,
                 }
             }
-            _ => continue,
+            unknown_type => {
+                return Err(format!("Operation '{}' has unknown type '{}'", op.op_id, unknown_type));
+            }
         };
 
         // Check for dependencies - moves depend on their destination folder being created
@@ -264,14 +313,18 @@ pub async fn execute_plan_parallel(
             let path_str = path.to_string_lossy().to_string();
             let op_id = if depends_on.is_empty() {
                 journal.add_operation(wal_op)
+                    .map_err(|e| format!("Failed to add operation: {}", e))?
             } else {
                 journal.add_operation_with_deps(wal_op, depends_on)
+                    .map_err(|e| format!("Failed to add operation: {}", e))?
             };
             folder_op_ids.insert(path_str, op_id);
         } else if depends_on.is_empty() {
-            journal.add_operation(wal_op);
+            journal.add_operation(wal_op)
+                .map_err(|e| format!("Failed to add operation: {}", e))?;
         } else {
-            journal.add_operation_with_deps(wal_op, depends_on);
+            journal.add_operation_with_deps(wal_op, depends_on)
+                .map_err(|e| format!("Failed to add operation: {}", e))?;
         }
     }
 
@@ -316,7 +369,87 @@ pub async fn execute_plan_parallel(
     // Clean up the journal if all succeeded
     if result.success {
         let _ = wal_manager.discard_journal(&plan.plan_id);
+
+        // V7: Clean up empty directories in the original folder
+        if let Some(ref original) = original_folder {
+            let original_path = PathBuf::from(original);
+            if original_path.exists() && original_path.is_dir() {
+                match cleanup_empty_directories(&original_path) {
+                    Ok(count) => {
+                        if count > 0 {
+                            tracing::info!(
+                                deleted = count,
+                                folder = %original,
+                                "Cleaned up empty directories after organization"
+                            );
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            error = %e,
+                            folder = %original,
+                            "Failed to clean up some empty directories"
+                        );
+                    }
+                }
+            }
+        }
     }
 
     Ok(result)
+}
+
+/// Recursively delete empty directories starting from the given path.
+/// Returns the number of directories deleted.
+///
+/// This function walks the directory tree depth-first and removes
+/// directories that are empty (or become empty after their children are removed).
+fn cleanup_empty_directories(path: &std::path::Path) -> Result<usize, String> {
+    let mut deleted_count = 0;
+
+    if !path.is_dir() {
+        return Ok(0);
+    }
+
+    // First, recursively clean up all subdirectories
+    let entries: Vec<_> = std::fs::read_dir(path)
+        .map_err(|e| format!("Failed to read directory {}: {}", path.display(), e))?
+        .filter_map(|e| e.ok())
+        .collect();
+
+    for entry in &entries {
+        let entry_path = entry.path();
+        if entry_path.is_dir() {
+            deleted_count += cleanup_empty_directories(&entry_path)?;
+        }
+    }
+
+    // Re-check if directory is now empty (after cleaning subdirectories)
+    let is_empty = std::fs::read_dir(path)
+        .map(|mut entries| entries.next().is_none())
+        .unwrap_or(false);
+
+    if is_empty {
+        // Don't delete if it's a protected path
+        if PathValidator::is_protected_path(path) {
+            tracing::debug!(path = %path.display(), "Skipping protected empty directory");
+            return Ok(deleted_count);
+        }
+
+        match std::fs::remove_dir(path) {
+            Ok(()) => {
+                tracing::debug!(path = %path.display(), "Deleted empty directory");
+                deleted_count += 1;
+            }
+            Err(e) => {
+                tracing::debug!(
+                    path = %path.display(),
+                    error = %e,
+                    "Could not delete directory (may not be empty or permission denied)"
+                );
+            }
+        }
+    }
+
+    Ok(deleted_count)
 }

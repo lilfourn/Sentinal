@@ -223,7 +223,10 @@ async fn call_haiku_for_disambiguation(
     // Get API key
     let api_key = CredentialManager::get_api_key("anthropic")?;
 
-    let client = Client::new();
+    let client = Client::builder()
+        .timeout(Duration::from_secs(60)) // Shorter timeout for Haiku disambiguation
+        .build()
+        .map_err(|e| format!("Failed to create HTTP client: {}", e))?;
 
     // Build context with file details and candidate folders
     let prompt = build_disambiguation_prompt(files, blueprint);

@@ -15,6 +15,48 @@ use serde_json::{json, Value};
 use std::fs;
 use std::path::PathBuf;
 
+/// Directories to skip during search (large caches, build outputs, etc.)
+const EXCLUDED_DIRS: &[&str] = &[
+    "node_modules",
+    ".git",
+    ".cache",
+    ".npm",
+    ".cargo",
+    "Library/Caches",
+    "Library/Application Support",
+    "target",
+    "build",
+    "dist",
+    ".venv",
+    "__pycache__",
+    ".Trash",
+    "Pods",
+    ".gradle",
+    ".m2",
+    ".pnpm",
+    ".yarn",
+    "vendor",
+    ".next",
+    ".nuxt",
+];
+
+/// Priority search paths for document-like queries (searched first)
+const PRIORITY_PATHS: &[&str] = &[
+    "Documents",
+    "Desktop",
+    "Downloads",
+    "Drive",
+    "Dropbox",
+    "OneDrive",
+    "Google Drive",
+    "iCloud Drive",
+];
+
+/// Document extensions (boost score for these when searching)
+const DOC_EXTENSIONS: &[&str] = &[
+    "pdf", "docx", "doc", "txt", "rtf", "odt", "pages", "md", "xlsx", "xls", "pptx", "ppt",
+];
+
 /// Result of executing a chat tool
 pub enum ChatToolResult {
     Success(String),
@@ -157,6 +199,64 @@ fn tokenize_query(query: &str) -> Vec<String> {
         .collect()
 }
 
+/// Capitalize the first letter of a string
+fn capitalize(s: &str) -> String {
+    let mut chars = s.chars();
+    match chars.next() {
+        None => String::new(),
+        Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+    }
+}
+
+/// Expand a query into multiple pattern variations for better matching
+/// "cover letters" → ["cover letters", "cover_letters", "coverletters", "cover-letters", "CoverLetters"]
+fn expand_query_to_patterns(query: &str) -> Vec<String> {
+    let base = query.to_lowercase();
+    let words: Vec<&str> = base.split_whitespace().collect();
+
+    let mut patterns = vec![base.clone()];
+
+    // Also add individual words as patterns
+    for word in &words {
+        if word.len() >= 2 && !patterns.contains(&word.to_string()) {
+            patterns.push(word.to_string());
+        }
+    }
+
+    if words.len() > 1 {
+        // "cover letters" -> various joined forms
+        patterns.push(words.join("_")); // cover_letters
+        patterns.push(words.join("")); // coverletters
+        patterns.push(words.join("-")); // cover-letters
+
+        // CamelCase: CoverLetters
+        let camel: String = words.iter().map(|w| capitalize(w)).collect();
+        patterns.push(camel.clone());
+
+        // Also add lowercase camelCase: coverLetters
+        if let Some((first, rest)) = words.split_first() {
+            let lower_camel =
+                first.to_string() + &rest.iter().map(|w| capitalize(w)).collect::<String>();
+            patterns.push(lower_camel);
+        }
+    }
+
+    patterns
+}
+
+/// Check if a directory name should be excluded from search
+fn should_exclude_dir(name: &str) -> bool {
+    EXCLUDED_DIRS.iter().any(|excluded| name == *excluded)
+}
+
+/// Check if a file has a document extension (for score boosting)
+fn is_document_extension(path: &PathBuf) -> bool {
+    path.extension()
+        .and_then(|ext| ext.to_str())
+        .map(|ext| DOC_EXTENSIONS.contains(&ext.to_lowercase().as_str()))
+        .unwrap_or(false)
+}
+
 /// Score how well a filename matches the query tokens
 /// Returns the count of tokens that appear in the filename
 fn score_filename(name: &str, tokens: &[String]) -> usize {
@@ -249,9 +349,17 @@ async fn execute_search_hybrid(input: &Value) -> ChatToolResult {
     // Results with scores: (path, score)
     let mut scored_results: Vec<(String, usize)> = Vec::new();
 
+    // Expand query into pattern variations for better matching
+    let expanded_patterns = expand_query_to_patterns(query);
+    eprintln!(
+        "[SearchHybrid] Expanded patterns: {:?}",
+        expanded_patterns
+    );
+
     fn search_recursive(
         dir: &PathBuf,
         tokens: &[String],
+        expanded_patterns: &[String],
         glob_regex: &Option<Regex>,
         file_types: &Option<Vec<String>>,
         results: &mut Vec<(String, usize)>,
@@ -259,7 +367,7 @@ async fn execute_search_hybrid(input: &Value) -> ChatToolResult {
         depth: usize,
     ) {
         // Increased depth limit for better coverage
-        if depth > 10 || results.len() >= max_results * 2 {
+        if depth > 15 || results.len() >= max_results * 2 {
             return;
         }
 
@@ -274,6 +382,11 @@ async fn execute_search_hybrid(input: &Value) -> ChatToolResult {
                     continue;
                 }
 
+                // Skip excluded directories (node_modules, .git, caches, etc.)
+                if path.is_dir() && should_exclude_dir(&name) {
+                    continue;
+                }
+
                 // Check file type filter if specified
                 if let Some(types) = file_types {
                     if !types.is_empty() {
@@ -282,7 +395,16 @@ async fn execute_search_hybrid(input: &Value) -> ChatToolResult {
                             if !types.contains(&ext_str) {
                                 // Still recurse into directories
                                 if path.is_dir() {
-                                    search_recursive(&path, tokens, glob_regex, file_types, results, max_results, depth + 1);
+                                    search_recursive(
+                                        &path,
+                                        tokens,
+                                        expanded_patterns,
+                                        glob_regex,
+                                        file_types,
+                                        results,
+                                        max_results,
+                                        depth + 1,
+                                    );
                                 }
                                 continue;
                             }
@@ -294,36 +416,105 @@ async fn execute_search_hybrid(input: &Value) -> ChatToolResult {
                 }
 
                 // Calculate match score
-                let score = if let Some(regex) = glob_regex {
+                let mut score = if let Some(regex) = glob_regex {
                     // Glob pattern matching
-                    if regex.is_match(&name) { 10 } else { 0 }
+                    if regex.is_match(&name) {
+                        10
+                    } else {
+                        0
+                    }
                 } else {
-                    // Word-based token matching
-                    score_filename(&name_lower, tokens)
+                    // Word-based token matching (original)
+                    let token_score = score_filename(&name_lower, tokens);
+
+                    // Also check expanded patterns for additional matches
+                    let pattern_score = expanded_patterns
+                        .iter()
+                        .filter(|p| name_lower.contains(p.as_str()))
+                        .count();
+
+                    // Take the better score
+                    token_score.max(pattern_score)
                 };
+
+                // Boost score for document extensions
+                if score > 0 && path.is_file() && is_document_extension(&path) {
+                    score += 2;
+                }
 
                 // Add to results if matched
                 if score > 0 && path.is_file() {
                     results.push((path.display().to_string(), score));
                 }
 
+                // Also match directories by name (for folders like "Cover Letters")
+                if score > 0 && path.is_dir() {
+                    // Note: we don't add the dir itself, but we prioritize searching it
+                }
+
                 // Recurse into directories
                 if path.is_dir() {
-                    search_recursive(&path, tokens, glob_regex, file_types, results, max_results, depth + 1);
+                    search_recursive(
+                        &path,
+                        tokens,
+                        expanded_patterns,
+                        glob_regex,
+                        file_types,
+                        results,
+                        max_results,
+                        depth + 1,
+                    );
                 }
             }
         }
     }
 
-    search_recursive(
-        &validated_search_path,
-        &tokens,
-        &glob_regex,
-        &file_types,
-        &mut scored_results,
-        max_results,
-        0,
-    );
+    // Check if searching from home directory - if so, search priority paths first
+    let home_dir = dirs::home_dir();
+    let is_home_search = home_dir
+        .as_ref()
+        .map(|h| validated_search_path == *h)
+        .unwrap_or(false);
+
+    if is_home_search {
+        eprintln!("[SearchHybrid] Home directory search - prioritizing common document locations");
+
+        // Search priority paths first
+        for priority_dir in PRIORITY_PATHS {
+            let priority_path = validated_search_path.join(priority_dir);
+            if priority_path.is_dir() {
+                search_recursive(
+                    &priority_path,
+                    &tokens,
+                    &expanded_patterns,
+                    &glob_regex,
+                    &file_types,
+                    &mut scored_results,
+                    max_results,
+                    0,
+                );
+
+                // If we found enough results in priority paths, stop early
+                if scored_results.len() >= max_results {
+                    break;
+                }
+            }
+        }
+    }
+
+    // If not enough results from priority paths, do full search
+    if scored_results.len() < max_results {
+        search_recursive(
+            &validated_search_path,
+            &tokens,
+            &expanded_patterns,
+            &glob_regex,
+            &file_types,
+            &mut scored_results,
+            max_results,
+            0,
+        );
+    }
 
     // Sort by score (highest first), then truncate
     scored_results.sort_by(|a, b| b.1.cmp(&a.1));

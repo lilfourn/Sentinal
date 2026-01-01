@@ -1,7 +1,7 @@
 import { createContext, useContext, type ReactNode } from 'react';
 import { useQueryClient } from '@tanstack/react-query';
 import { useDragDrop } from '../../hooks/useDragDrop';
-import { DragPreview } from './DragPreview';
+import { useSelectionStore } from '../../stores/selection-store';
 import type { DragState, DropTarget } from '../../types/drag-drop';
 
 interface DragDropContextValue {
@@ -13,10 +13,12 @@ interface DragDropContextValue {
   startDrag: (items: import('../../types/file').FileEntry[], sourceDirectory: string) => void;
   /** Set current drop target */
   setDropTarget: (path: string | null, isDirectory: boolean) => void;
-  /** Execute the drop */
-  executeDrop: () => Promise<boolean>;
+  /** Execute the drop. Pass targetPath to override state. */
+  executeDrop: (targetPath?: string) => Promise<boolean>;
   /** Cancel the drag */
   cancelDrag: () => void;
+  /** Set copy mode (Alt key held) */
+  setCopyMode: (isCopy: boolean) => void;
   /** Check if currently dragging */
   isDragging: boolean;
   /** Check if current drop target is valid */
@@ -31,14 +33,21 @@ interface DragDropProviderProps {
 
 export function DragDropProvider({ children }: DragDropProviderProps) {
   const queryClient = useQueryClient();
+  const clearSelection = useSelectionStore((state) => state.clearSelection);
 
   const dragDrop = useDragDrop({
-    onDropComplete: () => {
+    onDropComplete: (newPaths, isCopy) => {
+      console.log('[DragDropProvider] onDropComplete:', { newPaths, isCopy });
       // Invalidate directory queries to refresh the views
       queryClient.invalidateQueries({ queryKey: ['directory'] });
     },
     onDropError: (error) => {
-      console.error('Drop failed:', error);
+      console.error('[DragDropProvider] onDropError:', error);
+    },
+    onDragCancel: () => {
+      console.log('[DragDropProvider] onDragCancel');
+      // Clear selection when drag is cancelled (dropped on blank space)
+      clearSelection();
     },
   });
 
@@ -49,14 +58,15 @@ export function DragDropProvider({ children }: DragDropProviderProps) {
     setDropTarget: dragDrop.setDropTarget,
     executeDrop: dragDrop.executeDrop,
     cancelDrag: dragDrop.cancelDrag,
+    setCopyMode: dragDrop.setCopyMode,
     isDragging: dragDrop.isDragging,
     isValidTarget: dragDrop.isValidTarget,
   };
 
+  // Native HTML5 drag uses setDragImage() instead of a React overlay
   return (
     <DragDropContext.Provider value={contextValue}>
       {children}
-      {dragDrop.dragState && <DragPreview dragState={dragDrop.dragState} />}
     </DragDropContext.Provider>
   );
 }

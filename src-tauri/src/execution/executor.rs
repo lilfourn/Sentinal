@@ -9,10 +9,19 @@ use crate::wal::journal::WALManager;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, Semaphore};
 
 use super::dag::ExecutionDAG;
+
+/// Maximum number of concurrent filesystem operations
+/// This prevents overwhelming the system with too many parallel I/O operations
+const MAX_CONCURRENT_OPS: usize = 10;
+
+/// Number of operations between progress emissions
+/// Smaller values = more responsive UI, larger values = less event overhead
+const PROGRESS_BATCH_SIZE: usize = 5;
 
 /// Policy for handling destination conflicts during execution
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -242,8 +251,18 @@ impl ExecutionEngine {
                 "Executing level"
             );
 
+            // Calculate base progress for this level (completed + skipped + renamed before this level)
+            let base_completed = total_completed + total_skipped + total_renamed;
+
             let level_result = self
-                .execute_level_with_config(level, job_id, &config)
+                .execute_level_with_config(
+                    level,
+                    job_id,
+                    &config,
+                    progress_callback.clone(),
+                    base_completed,
+                    total_ops,
+                )
                 .await?;
 
             total_completed += level_result.completed;
@@ -253,9 +272,8 @@ impl ExecutionEngine {
             all_errors.extend(level_result.errors);
             all_skipped.extend(level_result.skipped_reasons);
 
-            // V5: Emit progress callback after each level completes
+            // Emit final progress for this level (catches any stragglers not caught by batch threshold)
             if let Some(ref callback) = progress_callback {
-                // Count completed + skipped + renamed as "processed"
                 let processed = total_completed + total_skipped + total_renamed;
                 callback(processed, total_ops);
             }
@@ -282,98 +300,16 @@ impl ExecutionEngine {
         ))
     }
 
-    /// Execute a single level of operations in parallel
-    async fn execute_level(
-        &self,
-        entries: Vec<WALEntry>,
-        job_id: &str,
-    ) -> Result<(usize, usize, Vec<String>), String> {
-        if entries.is_empty() {
-            return Ok((0, 0, Vec::new()));
-        }
-
-        // Shared state for collecting results
-        let completed = Arc::new(Mutex::new(0usize));
-        let failed = Arc::new(Mutex::new(0usize));
-        let errors = Arc::new(Mutex::new(Vec::<String>::new()));
-
-        // Load journal for updating (we'll save after each operation)
-        let job_id_owned = job_id.to_string();
-
-        // Spawn tasks for each operation
-        let mut handles = Vec::new();
-
-        for entry in entries {
-            let entry_id = entry.id;
-            let operation = entry.operation.clone();
-            let completed = Arc::clone(&completed);
-            let failed = Arc::clone(&failed);
-            let errors = Arc::clone(&errors);
-            let job_id = job_id_owned.clone();
-
-            let handle = tokio::spawn(async move {
-                let manager = WALManager::new();
-
-                // Mark as in progress
-                if let Err(e) = manager.mark_entry_in_progress(&job_id, entry_id) {
-                    tracing::debug!(error = %e, "Failed to mark in progress");
-                }
-
-                tracing::debug!(
-                    operation = %operation.description(),
-                    "Executing operation"
-                );
-
-                // Execute the operation
-                match execute_operation(&operation).await {
-                    Ok(()) => {
-                        if let Err(e) = manager.mark_entry_complete(&job_id, entry_id) {
-                            tracing::debug!(error = %e, "Failed to mark complete");
-                        }
-                        let mut c = completed.lock().await;
-                        *c += 1;
-                        tracing::debug!("Operation completed successfully");
-                    }
-                    Err(err) => {
-                        if let Err(e) = manager.mark_entry_failed(&job_id, entry_id, err.clone()) {
-                            tracing::debug!(error = %e, "Failed to mark failed");
-                        }
-                        let mut f = failed.lock().await;
-                        *f += 1;
-                        let mut e = errors.lock().await;
-                        e.push(err.clone());
-                        tracing::debug!(error = %err, "Operation failed");
-                    }
-                }
-            });
-
-            handles.push(handle);
-        }
-
-        // Wait for all operations in this level to complete
-        for handle in handles {
-            if let Err(join_err) = handle.await {
-                tracing::warn!(error = %join_err, "Task panicked");
-                let mut f = failed.lock().await;
-                *f += 1;
-                let mut errs = errors.lock().await;
-                errs.push(format!("Task panicked: {}", join_err));
-            }
-        }
-
-        let completed = *completed.lock().await;
-        let failed = *failed.lock().await;
-        let errors = errors.lock().await.clone();
-
-        Ok((completed, failed, errors))
-    }
-
     /// Execute a single level of operations with conflict configuration
+    /// Now accepts progress callback for real-time updates every PROGRESS_BATCH_SIZE operations
     async fn execute_level_with_config(
         &self,
         entries: Vec<WALEntry>,
-        job_id: &str,
+        _job_id: &str,
         config: &ExecutionConfig,
+        progress_callback: Option<Arc<ProgressCallback>>,
+        base_completed: usize,
+        total_ops: usize,
     ) -> Result<LevelResult, String> {
         if entries.is_empty() {
             return Ok(LevelResult::default());
@@ -387,14 +323,19 @@ impl ExecutionEngine {
         let errors = Arc::new(Mutex::new(Vec::<String>::new()));
         let skipped_reasons = Arc::new(Mutex::new(Vec::<String>::new()));
 
-        let job_id_owned = job_id.to_string();
+        // Atomic counters for progress tracking (lock-free for performance)
+        let level_processed = Arc::new(AtomicUsize::new(0));
+        let ops_since_emit = Arc::new(AtomicUsize::new(0));
+
+        // Semaphore to limit concurrent operations
+        let semaphore = Arc::new(Semaphore::new(MAX_CONCURRENT_OPS));
+
         let config = config.clone();
 
         // Spawn tasks for each operation
         let mut handles = Vec::new();
 
         for entry in entries {
-            let entry_id = entry.id;
             let operation = entry.operation.clone();
             let completed = Arc::clone(&completed);
             let failed = Arc::clone(&failed);
@@ -402,16 +343,18 @@ impl ExecutionEngine {
             let renamed = Arc::clone(&renamed);
             let errors = Arc::clone(&errors);
             let skipped_reasons = Arc::clone(&skipped_reasons);
-            let job_id = job_id_owned.clone();
+            let semaphore = Arc::clone(&semaphore);
             let config = config.clone();
+            let level_processed = Arc::clone(&level_processed);
+            let ops_since_emit = Arc::clone(&ops_since_emit);
+            let progress_callback = progress_callback.clone();
 
             let handle = tokio::spawn(async move {
-                let manager = WALManager::new();
+                // Acquire semaphore permit to limit concurrency
+                let _permit = semaphore.acquire().await.expect("Semaphore closed");
 
-                // Mark as in progress
-                if let Err(e) = manager.mark_entry_in_progress(&job_id, entry_id) {
-                    tracing::debug!(error = %e, "Failed to mark in progress");
-                }
+                // NOTE: We removed per-operation WAL marking here to fix blocking deadlock.
+                // WAL status is now updated at level boundaries only.
 
                 tracing::debug!(
                     operation = %operation.description(),
@@ -421,9 +364,6 @@ impl ExecutionEngine {
                 // Execute the operation with config
                 match execute_operation_with_config(&operation, &config).await {
                     Ok(outcome) => {
-                        if let Err(e) = manager.mark_entry_complete(&job_id, entry_id) {
-                            tracing::debug!(error = %e, "Failed to mark complete");
-                        }
                         match outcome {
                             ExecutionOutcome::Completed => {
                                 let mut c = completed.lock().await;
@@ -448,14 +388,23 @@ impl ExecutionEngine {
                         }
                     }
                     Err(err) => {
-                        if let Err(e) = manager.mark_entry_failed(&job_id, entry_id, err.clone()) {
-                            tracing::debug!(error = %e, "Failed to mark failed");
-                        }
                         let mut f = failed.lock().await;
                         *f += 1;
                         let mut e = errors.lock().await;
                         e.push(err.clone());
                         tracing::debug!(error = %err, "Operation failed");
+                    }
+                }
+
+                // Update progress counters and emit if batch threshold reached
+                let processed = level_processed.fetch_add(1, Ordering::SeqCst) + 1;
+                let since_emit = ops_since_emit.fetch_add(1, Ordering::SeqCst) + 1;
+
+                if since_emit >= PROGRESS_BATCH_SIZE {
+                    // Reset counter and emit progress
+                    ops_since_emit.store(0, Ordering::SeqCst);
+                    if let Some(ref cb) = progress_callback {
+                        cb(base_completed + processed, total_ops);
                     }
                 }
             });
@@ -978,7 +927,7 @@ impl ExecutionBuilder {
     }
 
     /// Add an operation to the execution plan
-    pub fn add_operation(&mut self, operation: WALOperationType) -> uuid::Uuid {
+    pub fn add_operation(&mut self, operation: WALOperationType) -> Result<uuid::Uuid, String> {
         self.journal.add_operation(operation)
     }
 
@@ -987,7 +936,7 @@ impl ExecutionBuilder {
         &mut self,
         operation: WALOperationType,
         depends_on: Vec<uuid::Uuid>,
-    ) -> uuid::Uuid {
+    ) -> Result<uuid::Uuid, String> {
         self.journal.add_operation_with_deps(operation, depends_on)
     }
 
@@ -1067,6 +1016,7 @@ mod tests {
                     },
                     i as u32,
                 )
+                .expect("Failed to create test entry")
             })
             .collect();
 

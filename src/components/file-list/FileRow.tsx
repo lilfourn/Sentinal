@@ -17,6 +17,9 @@ import type { FileEntry } from '../../types/file';
 import type { GhostState } from '../../types/ghost';
 import '../ghost/GhostAnimations.css';
 
+// Throttle logging for dragOver (fires continuously)
+let lastDragOverLog = 0;
+
 interface FileRowProps {
   entry: FileEntry;
   isSelected: boolean;
@@ -36,12 +39,16 @@ interface FileRowProps {
   onContextMenu?: (e: React.MouseEvent) => void;
   onRenameConfirm?: (newName: string) => void;
   onRenameCancel?: () => void;
-  /** Called when user starts dragging this item */
-  onDragStart?: (e: React.MouseEvent) => void;
+  /** Called when native HTML5 drag starts - parent sets up dataTransfer */
+  onDragStart?: (e: React.DragEvent) => void;
   /** Called when dragging enters this item (for drop target highlighting) */
-  onDragEnter?: () => void;
+  onDragEnter?: (e: React.DragEvent) => void;
+  /** Called when dragging over this item */
+  onDragOver?: (e: React.DragEvent) => void;
+  /** Called when dragging leaves this item */
+  onDragLeave?: (e: React.DragEvent) => void;
   /** Called when user drops on this item */
-  onDrop?: () => void;
+  onDrop?: (e: React.DragEvent) => void;
 }
 
 const fileTypeIcons: Record<string, LucideIcon> = {
@@ -79,66 +86,57 @@ export function FileRow({
   onRenameCancel,
   onDragStart,
   onDragEnter,
+  onDragOver,
+  onDragLeave,
   onDrop,
 }: FileRowProps) {
   const Icon = getFileIcon(entry);
   const ghostClasses = getGhostClasses(ghostState);
 
-  // Handle mouse down for drag initiation
-  const handleMouseDown = (e: React.MouseEvent) => {
-    // Only initiate drag on left click, not during editing
-    if (e.button !== 0 || isEditing) return;
-
-    // Track if this will become a drag
-    const startX = e.clientX;
-    const startY = e.clientY;
-    const threshold = 5; // pixels to move before considering it a drag
-
-    const handleMouseMove = (moveEvent: MouseEvent) => {
-      const deltaX = Math.abs(moveEvent.clientX - startX);
-      const deltaY = Math.abs(moveEvent.clientY - startY);
-
-      if (deltaX > threshold || deltaY > threshold) {
-        // This is a drag, not a click
-        document.removeEventListener('mousemove', handleMouseMove);
-        document.removeEventListener('mouseup', handleMouseUp);
-        onDragStart?.(e);
-      }
-    };
-
-    const handleMouseUp = () => {
-      document.removeEventListener('mousemove', handleMouseMove);
-      document.removeEventListener('mouseup', handleMouseUp);
-    };
-
-    document.addEventListener('mousemove', handleMouseMove);
-    document.addEventListener('mouseup', handleMouseUp);
+  // Native HTML5 drag start - delegate to parent for full setup
+  const handleDragStart = (e: React.DragEvent) => {
+    console.log('[FileRow] handleDragStart:', { path: entry.path, isDirectory: entry.isDirectory });
+    // Parent will set up ghost image, data transfer, etc.
+    onDragStart?.(e);
   };
 
-  // Handle HTML5 drag start for chat panel context
-  const handleDragStartHTML5 = (e: React.DragEvent) => {
-    // Set sentinel custom MIME types for chat panel
-    e.dataTransfer.setData('sentinel/path', entry.path);
-    e.dataTransfer.setData('sentinel/type', entry.isDirectory ? 'folder' : 'file');
-    e.dataTransfer.setData('sentinel/name', entry.name);
-    e.dataTransfer.setData('sentinel/size', String(entry.size || 0));
-    if (entry.mimeType) {
-      e.dataTransfer.setData('sentinel/mime', entry.mimeType);
-    }
-    e.dataTransfer.effectAllowed = 'copyLink';
-  };
-
-  // Handle mouse enter for drop target detection
-  const handleMouseEnter = () => {
-    if (onDragEnter && entry.isDirectory) {
-      onDragEnter();
+  // Native drag enter - only trigger for directories (drop targets)
+  const handleDragEnter = (e: React.DragEvent) => {
+    console.log('[FileRow] handleDragEnter:', { path: entry.path, isDirectory: entry.isDirectory });
+    if (entry.isDirectory) {
+      onDragEnter?.(e);
     }
   };
 
-  // Handle mouse up for drop
-  const handleMouseUp = () => {
-    if (onDrop && entry.isDirectory) {
-      onDrop();
+  // Native drag over - must prevent default to allow drop
+  const handleDragOver = (e: React.DragEvent) => {
+    // Only log once every 500ms to avoid flooding console
+    const now = Date.now();
+    if (entry.isDirectory && (!lastDragOverLog || now - lastDragOverLog > 500)) {
+      console.log('[FileRow] handleDragOver:', { path: entry.path, isDirectory: entry.isDirectory });
+      lastDragOverLog = now;
+    }
+    if (entry.isDirectory) {
+      e.preventDefault();
+      e.stopPropagation();
+      onDragOver?.(e);
+    }
+  };
+
+  // Native drag leave
+  const handleDragLeave = (e: React.DragEvent) => {
+    if (entry.isDirectory) {
+      onDragLeave?.(e);
+    }
+  };
+
+  // Native drop
+  const handleDrop = (e: React.DragEvent) => {
+    console.log('[FileRow] handleDrop:', { path: entry.path, isDirectory: entry.isDirectory });
+    if (entry.isDirectory) {
+      e.preventDefault();
+      e.stopPropagation();
+      onDrop?.(e);
     }
   };
 
@@ -146,10 +144,11 @@ export function FileRow({
     <div
       style={style}
       draggable={!isEditing}
-      onDragStart={handleDragStartHTML5}
-      onMouseDown={handleMouseDown}
-      onMouseEnter={handleMouseEnter}
-      onMouseUp={handleMouseUp}
+      onDragStart={handleDragStart}
+      onDragEnter={handleDragEnter}
+      onDragOver={handleDragOver}
+      onDragLeave={handleDragLeave}
+      onDrop={handleDrop}
       onClick={isEditing ? undefined : onClick}
       onDoubleClick={isEditing ? undefined : onDoubleClick}
       onContextMenu={isEditing ? undefined : onContextMenu}

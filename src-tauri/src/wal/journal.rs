@@ -515,7 +515,7 @@ mod tests {
         let mut journal = WALJournal::new("test-job".to_string(), PathBuf::from("/test"));
         journal.add_operation(WALOperationType::CreateFolder {
             path: PathBuf::from("/test/new"),
-        });
+        }).unwrap();
 
         manager.save_journal(&journal).unwrap();
 
@@ -535,7 +535,7 @@ mod tests {
             WALJournal::new("complete-job".to_string(), PathBuf::from("/test1"));
         let id = complete_journal.add_operation(WALOperationType::CreateFolder {
             path: PathBuf::from("/test1/new"),
-        });
+        }).unwrap();
         complete_journal.get_entry_mut(id).unwrap().mark_complete();
         manager.save_journal(&complete_journal).unwrap();
 
@@ -544,7 +544,7 @@ mod tests {
             WALJournal::new("incomplete-job".to_string(), PathBuf::from("/test2"));
         incomplete_journal.add_operation(WALOperationType::CreateFolder {
             path: PathBuf::from("/test2/new"),
-        });
+        }).unwrap();
         manager.save_journal(&incomplete_journal).unwrap();
 
         // Should find the incomplete one
@@ -560,7 +560,7 @@ mod tests {
         let mut journal = WALJournal::new("test-job".to_string(), PathBuf::from("/test"));
         let entry_id = journal.add_operation(WALOperationType::CreateFolder {
             path: PathBuf::from("/test/new"),
-        });
+        }).unwrap();
         manager.save_journal(&journal).unwrap();
 
         manager

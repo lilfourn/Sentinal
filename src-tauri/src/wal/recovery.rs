@@ -4,8 +4,12 @@
 //! - Checking for interrupted operations on startup
 //! - Resuming incomplete operations
 //! - Rolling back failed operations in reverse order
+//!
+//! ## Security
+//! All operations check for symlinks before execution to prevent symlink attacks.
 
 use super::entry::{WALJournal, WALOperationType, WALStatus};
+use super::io::{copy_dir_safe, is_symlink};
 use super::journal::WALManager;
 use crate::security::PathValidator;
 use chrono::{DateTime, Utc};
@@ -272,14 +276,36 @@ pub fn discard_journal(job_id: &str) -> Result<(), String> {
     manager.discard_journal(job_id).map_err(|e| e.message)
 }
 
+/// Ensure a path is not a symlink before operating on it
+fn ensure_not_symlink(path: &Path, operation: &str) -> Result<(), String> {
+    if is_symlink(path) {
+        return Err(format!(
+            "Refusing to {} symlink: {}",
+            operation,
+            path.display()
+        ));
+    }
+    Ok(())
+}
+
 /// Execute a single WAL operation
 ///
 /// This function performs the actual filesystem operation.
 /// It's used by both resume and rollback paths.
+///
+/// ## Security
+/// All operations check for symlinks before execution to prevent symlink attacks.
 fn execute_operation(operation: &WALOperationType) -> Result<(), String> {
     match operation {
         WALOperationType::CreateFolder { path } => {
             if path.exists() {
+                // Check if existing path is a symlink
+                if is_symlink(path) {
+                    return Err(format!(
+                        "Cannot create folder: path exists as symlink: {}",
+                        path.display()
+                    ));
+                }
                 // Already exists, consider it success
                 return Ok(());
             }
@@ -299,6 +325,9 @@ fn execute_operation(operation: &WALOperationType) -> Result<(), String> {
                 return Err(format!("Source not found: {}", source.display()));
             }
 
+            // Security: Check source is not a symlink
+            ensure_not_symlink(source, "move")?;
+
             if destination.exists() {
                 return Err(format!("Destination already exists: {}", destination.display()));
             }
@@ -311,7 +340,9 @@ fn execute_operation(operation: &WALOperationType) -> Result<(), String> {
             // Try rename first (same filesystem), fall back to copy+delete
             if fs::rename(source, destination).is_err() {
                 if source.is_dir() {
-                    copy_dir_all(source, destination)?;
+                    // Use symlink-safe copy
+                    copy_dir_safe(source, destination)
+                        .map_err(|e| format!("Failed to copy directory: {}", e))?;
                     fs::remove_dir_all(source)
                         .map_err(|e| format!("Failed to remove source: {}", e))?;
                 } else {
@@ -329,6 +360,9 @@ fn execute_operation(operation: &WALOperationType) -> Result<(), String> {
             if !path.exists() {
                 return Err(format!("Path not found: {}", path.display()));
             }
+
+            // Security: Check path is not a symlink
+            ensure_not_symlink(path, "rename")?;
 
             let parent = path
                 .parent()
@@ -351,6 +385,9 @@ fn execute_operation(operation: &WALOperationType) -> Result<(), String> {
             path,
             quarantine_path,
         } => {
+            // Security: Check path is not a symlink before quarantine
+            ensure_not_symlink(path, "quarantine")?;
+
             // Quarantine is just a move to a special location
             execute_operation(&WALOperationType::Move {
                 source: path.clone(),
@@ -366,12 +403,18 @@ fn execute_operation(operation: &WALOperationType) -> Result<(), String> {
                 return Err(format!("Source not found: {}", source.display()));
             }
 
+            // Security: Check source is not a symlink
+            ensure_not_symlink(source, "copy")?;
+
             if destination.exists() {
                 return Err(format!("Destination already exists: {}", destination.display()));
             }
 
             if source.is_dir() {
-                copy_dir_all(source, destination)
+                // Use symlink-safe recursive copy
+                copy_dir_safe(source, destination)
+                    .map_err(|e| format!("Failed to copy directory: {}", e))?;
+                Ok(())
             } else {
                 fs::copy(source, destination)
                     .map_err(|e| format!("Failed to copy: {}", e))
@@ -384,6 +427,9 @@ fn execute_operation(operation: &WALOperationType) -> Result<(), String> {
                 // Already deleted, consider it success
                 return Ok(());
             }
+
+            // Security: Check path is not a symlink
+            ensure_not_symlink(path, "delete")?;
 
             if !path.is_dir() {
                 // It's a file, try to delete it
@@ -412,28 +458,6 @@ fn execute_operation(operation: &WALOperationType) -> Result<(), String> {
     }
 }
 
-/// Helper function to copy a directory recursively
-fn copy_dir_all(src: &Path, dst: &Path) -> Result<(), String> {
-    fs::create_dir_all(dst).map_err(|e| format!("Failed to create directory: {}", e))?;
-
-    for entry in fs::read_dir(src).map_err(|e| format!("Failed to read directory: {}", e))? {
-        let entry = entry.map_err(|e| format!("Failed to read entry: {}", e))?;
-        let ty = entry
-            .file_type()
-            .map_err(|e| format!("Failed to get file type: {}", e))?;
-
-        let src_path = entry.path();
-        let dst_path = dst.join(entry.file_name());
-
-        if ty.is_dir() {
-            copy_dir_all(&src_path, &dst_path)?;
-        } else {
-            fs::copy(&src_path, &dst_path).map_err(|e| format!("Failed to copy file: {}", e))?;
-        }
-    }
-
-    Ok(())
-}
 
 /// Get details about a specific journal for recovery UI
 pub fn get_journal_details(job_id: &str) -> Result<Option<WALJournal>, String> {

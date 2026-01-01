@@ -1,6 +1,7 @@
 pub mod chat;
 pub mod client;
 pub mod credentials;
+pub mod grok;
 pub mod json_parser;
 pub mod naming;
 pub mod prompts;
@@ -12,5 +13,7 @@ pub mod v2;
 pub use chat::*;
 pub use client::*;
 pub use credentials::*;
+#[allow(unused_imports)]
+pub use grok::*;
 pub use naming::*;
 pub use v2::*;

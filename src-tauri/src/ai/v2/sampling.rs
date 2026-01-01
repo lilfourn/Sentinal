@@ -17,6 +17,7 @@
 //! This reduces O(N) complexity to O(1) constant context size.
 
 use crate::ai::rules::VirtualFile;
+use crate::utils::format_size;
 use serde::Serialize;
 use std::collections::HashMap;
 
@@ -299,23 +300,6 @@ fn file_to_sample(file: &VirtualFile, reason: &str) -> SampleFile {
         size_formatted,
         modified_at,
         sample_reason: reason.to_string(),
-    }
-}
-
-/// Format file size for display
-fn format_size(bytes: u64) -> String {
-    const KB: u64 = 1024;
-    const MB: u64 = KB * 1024;
-    const GB: u64 = MB * 1024;
-
-    if bytes >= GB {
-        format!("{:.1}GB", bytes as f64 / GB as f64)
-    } else if bytes >= MB {
-        format!("{:.1}MB", bytes as f64 / MB as f64)
-    } else if bytes >= KB {
-        format!("{:.1}KB", bytes as f64 / KB as f64)
-    } else {
-        format!("{}B", bytes)
     }
 }
 

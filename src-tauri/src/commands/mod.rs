@@ -1,6 +1,7 @@
 pub mod ai;
 pub mod chat;
 pub mod filesystem;
+pub mod grok;
 pub mod jobs;
 pub mod permissions;
 pub mod photos;
@@ -13,6 +14,7 @@ pub mod watcher;
 pub use ai::*;
 pub use chat::*;
 pub use filesystem::*;
+pub use grok::*;
 pub use jobs::*;
 pub use permissions::*;
 pub use photos::*;

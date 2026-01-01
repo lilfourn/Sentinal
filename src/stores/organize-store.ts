@@ -1,7 +1,7 @@
 import { create } from 'zustand';
 import { invoke } from '@tauri-apps/api/core';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
-import type { NamingConvention, NamingConventionSuggestions } from '../types/naming-convention';
+import type { NamingConvention } from '../types/naming-convention';
 import type { OperationStatus, WalEntry, WalRecoveryInfo, WalRecoveryResult } from '../types/ghost';
 
 // Execution result from the parallel DAG executor
@@ -129,6 +129,11 @@ interface OrganizeState {
 
   // Latest event for dynamic status display
   latestEvent: { type: string; detail: string } | null;
+
+  // Completion tracking for auto-refresh
+  // When organization completes, these are set to trigger file list refresh
+  lastCompletedAt: number | null;
+  completedTargetFolder: string | null;
 }
 
 // Info about an interrupted job for recovery UI
@@ -280,6 +285,8 @@ export const useOrganizeStore = create<OrganizeState & OrganizeActions>((set, ge
   conventionSkipped: false,
   latestEvent: null,
   executionProgress: null,
+  lastCompletedAt: null,
+  completedTargetFolder: null,
 
   // Thought actions
   addThought: (type, content, detail, expandableDetails) => set((state) => ({
@@ -823,9 +830,11 @@ export const useOrganizeStore = create<OrganizeState & OrganizeActions>((set, ge
       };
 
       // Execute using parallel DAG executor with auto-rename conflict policy
+      // Pass originalFolder for post-execution cleanup of empty directories
       const result = await invoke<ExecutionResult>('execute_plan_parallel', {
         plan: backendPlan,
         conflictPolicy: 'auto_rename', // Auto-rename duplicates like file_1.pdf, file_2.pdf
+        originalFolder: get().targetFolder, // Original folder for empty directory cleanup
       });
 
       // Clean up listener
@@ -856,10 +865,16 @@ export const useOrganizeStore = create<OrganizeState & OrganizeActions>((set, ge
         }
         get().addThought('complete', 'Organization complete!', completionDetail);
 
+        // Get the target folder before clearing state
+        const completedFolder = currentPlan.targetFolder;
+
         set({
           phase: 'complete',
           isExecuting: false,
           currentOpIndex: -1,
+          // Set completion tracking to trigger file list refresh
+          lastCompletedAt: Date.now(),
+          completedTargetFolder: completedFolder,
         });
 
         // Mark job as complete

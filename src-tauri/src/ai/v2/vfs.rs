@@ -8,6 +8,7 @@
 
 use crate::ai::rules::{RuleEvaluator, VirtualFile, VectorIndex};
 use crate::security::PathValidator;
+use crate::utils::format_size;
 use super::local_vector_index::{LocalVectorConfig, LocalVectorIndex};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -79,8 +80,11 @@ pub struct OrganizationRule {
 
 /// Shadow Virtual File System for planning operations
 pub struct ShadowVFS {
-    /// Root path of the target folder
+    /// Root path of the target folder (the folder being organized)
     root: PathBuf,
+    /// Organization root - where new folders are created (parent of target folder)
+    /// This allows organizing `cuero/2025/` to create `cuero/NewFolder/` instead of `cuero/2025/NewFolder/`
+    organization_root: PathBuf,
     /// Virtual files indexed by path
     files: HashMap<String, VirtualFile>,
     /// Planned operations
@@ -140,8 +144,13 @@ impl ShadowVFS {
             })?;
         }
 
+        // Organization root is the target folder itself
+        // All organization happens WITHIN the selected folder, not at the parent level
+        let organization_root = root.to_path_buf();
+
         Ok(Self {
             root: root.to_path_buf(),
+            organization_root,
             files,
             operations: Vec::new(),
             op_counter: 0,
@@ -149,6 +158,11 @@ impl ShadowVFS {
             matched_files: std::collections::HashSet::new(),
             destination_registry: HashMap::new(),
         })
+    }
+
+    /// Get the organization root (parent folder where new structure is created)
+    pub fn organization_root(&self) -> &Path {
+        &self.organization_root
     }
 
     fn scan_directory(
@@ -418,10 +432,11 @@ impl ShadowVFS {
                 // Handle move operation
                 if let Some(ref dest_folder) = rule.then_move_to {
                     // Security: Validate destination path using PathValidator
-                    // Disallow absolute paths - all destinations must be relative to root
+                    // Disallow absolute paths - all destinations must be relative to organization_root
+                    // organization_root is the target folder itself, so all organized files stay within it
                     let dest_path = match PathValidator::validate_destination(
                         dest_folder,
-                        &self.root,
+                        &self.organization_root,
                         false, // Disallow absolute paths in organization rules
                     ) {
                         Ok(p) => p,
@@ -745,23 +760,6 @@ pub struct OperationPreview {
     pub total_operations: usize,
     /// Number of files that won't be changed
     pub unchanged_files: usize,
-}
-
-/// Format file size for display
-fn format_size(bytes: u64) -> String {
-    const KB: u64 = 1024;
-    const MB: u64 = KB * 1024;
-    const GB: u64 = MB * 1024;
-
-    if bytes >= GB {
-        format!("{:.1}GB", bytes as f64 / GB as f64)
-    } else if bytes >= MB {
-        format!("{:.1}MB", bytes as f64 / MB as f64)
-    } else if bytes >= KB {
-        format!("{:.1}KB", bytes as f64 / KB as f64)
-    } else {
-        format!("{}B", bytes)
-    }
 }
 
 #[cfg(test)]

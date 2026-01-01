@@ -1,5 +1,6 @@
 import { useDirectory } from '../../hooks/useDirectory';
 import { useNavigationStore } from '../../stores/navigation-store';
+import { useOrganizeRefresh } from '../../hooks/useOrganizeRefresh';
 import { FileListView } from '../file-list/FileListView';
 import { FileGridView } from '../file-list/FileGridView';
 import { FileColumnsView } from '../file-list/FileColumnsView';
@@ -10,6 +11,9 @@ import { Loader2 } from 'lucide-react';
 
 export function MainView() {
   const { currentPath, showHidden, viewMode, appMode } = useNavigationStore();
+
+  // Watch for organization completion and auto-refresh file listings
+  useOrganizeRefresh();
   const { data, isLoading, error } = useDirectory(currentPath, showHidden);
 
   // Photos mode

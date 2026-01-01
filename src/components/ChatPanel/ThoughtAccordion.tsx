@@ -1,6 +1,21 @@
 import { useState } from 'react';
-import { ChevronDown, ChevronRight, Loader2, CheckCircle, AlertCircle, Search, FileText, FolderOpen, List, Terminal } from 'lucide-react';
+import { ChevronDown, ChevronRight, Loader2, CheckCircle, AlertCircle, Search, FileText, FolderOpen, List, Terminal, ShieldCheck, ShieldAlert } from 'lucide-react';
+import { invoke } from '@tauri-apps/api/core';
 import type { ThoughtStep } from '../../stores/chat-store';
+
+/** Parse NEEDS_APPROVAL error format: NEEDS_APPROVAL|command|reason|message */
+function parseNeedsApproval(output: string): { command: string; reason: string; message: string } | null {
+  if (!output?.startsWith('NEEDS_APPROVAL|')) return null;
+
+  const parts = output.split('|');
+  if (parts.length < 4) return null;
+
+  return {
+    command: parts[1].replace(/\\\|/g, '|'),
+    reason: parts[2].replace(/\\\|/g, '|'),
+    message: parts.slice(3).join('|').replace(/\\\|/g, '|'),
+  };
+}
 
 interface ThoughtAccordionProps {
   thoughts: ThoughtStep[];
@@ -12,11 +27,12 @@ const TOOL_ICONS: Record<string, React.ReactNode> = {
   inspect_pattern: <FolderOpen size={12} />,
   list_directory: <List size={12} />,
   bash: <Terminal size={12} />,
+  shell: <Terminal size={12} />,
   grep: <Search size={12} />,
 };
 
 // Terminal tools get special styling
-const TERMINAL_TOOLS = ['bash', 'grep'];
+const TERMINAL_TOOLS = ['bash', 'grep', 'shell'];
 
 function StatusIcon({ status }: { status: ThoughtStep['status'] }) {
   switch (status) {
@@ -33,8 +49,27 @@ function StatusIcon({ status }: { status: ThoughtStep['status'] }) {
 
 function ThoughtItem({ thought }: { thought: ThoughtStep }) {
   const [isExpanded, setIsExpanded] = useState(false);
+  const [approvalState, setApprovalState] = useState<'idle' | 'approving' | 'approved' | 'denied'>('idle');
   const hasOutput = thought.output && thought.output.length > 0;
   const isTerminal = TERMINAL_TOOLS.includes(thought.tool);
+
+  // Check if this is a NEEDS_APPROVAL error
+  const approvalInfo = thought.status === 'error' ? parseNeedsApproval(thought.output || '') : null;
+
+  const handleApprove = async (asPattern: boolean) => {
+    if (!approvalInfo) return;
+    setApprovalState('approving');
+    try {
+      await invoke('allow_shell_command', {
+        command: approvalInfo.command,
+        asPattern
+      });
+      setApprovalState('approved');
+    } catch (e) {
+      console.error('Failed to approve command:', e);
+      setApprovalState('denied');
+    }
+  };
 
   // Terminal-style display for bash/grep
   if (isTerminal) {
@@ -50,8 +85,54 @@ function ThoughtItem({ thought }: { thought: ThoughtStep }) {
           </code>
         </div>
 
-        {/* Output (always show for terminal commands when available) */}
-        {hasOutput && (
+        {/* Approval UI for blocked commands */}
+        {approvalInfo && (
+          <div className="mt-2 ml-4 p-3 bg-amber-900/30 border border-amber-500/40 rounded-lg">
+            <div className="flex items-start gap-2 mb-2">
+              <ShieldAlert size={14} className="text-amber-400 mt-0.5 flex-shrink-0" />
+              <div className="text-xs">
+                <p className="text-amber-200 font-medium">{approvalInfo.reason}</p>
+                <p className="text-amber-300/70 mt-1">{approvalInfo.message}</p>
+              </div>
+            </div>
+
+            {approvalState === 'idle' && (
+              <div className="flex gap-2 mt-3">
+                <button
+                  onClick={() => handleApprove(false)}
+                  className="flex items-center gap-1.5 px-3 py-1.5 bg-amber-600 hover:bg-amber-500 text-white text-xs font-medium rounded transition-colors"
+                >
+                  <ShieldCheck size={12} />
+                  Allow Once
+                </button>
+                <button
+                  onClick={() => handleApprove(true)}
+                  className="flex items-center gap-1.5 px-3 py-1.5 bg-green-600 hover:bg-green-500 text-white text-xs font-medium rounded transition-colors"
+                >
+                  <ShieldCheck size={12} />
+                  Always Allow
+                </button>
+              </div>
+            )}
+
+            {approvalState === 'approving' && (
+              <div className="flex items-center gap-2 mt-3 text-xs text-amber-300">
+                <Loader2 size={12} className="animate-spin" />
+                Saving permission...
+              </div>
+            )}
+
+            {approvalState === 'approved' && (
+              <div className="flex items-center gap-2 mt-3 text-xs text-green-400">
+                <CheckCircle size={12} />
+                Permission granted. Re-run the command to continue.
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* Output (always show for terminal commands when available, but hide NEEDS_APPROVAL raw format) */}
+        {hasOutput && !approvalInfo && (
           <div className="mt-1 ml-4 p-2 bg-gray-950 rounded text-xs font-mono text-gray-300 whitespace-pre-wrap overflow-x-auto max-h-48 overflow-y-auto">
             {thought.output}
           </div>

@@ -1,6 +1,6 @@
 import { useEffect, useRef } from 'react';
 import { createPortal } from 'react-dom';
-import { File, Folder, Loader2 } from 'lucide-react';
+import { Loader2 } from 'lucide-react';
 import { useChatStore, type MentionItem } from '../../stores/chat-store';
 
 interface InlineMentionDropdownProps {
@@ -56,8 +56,8 @@ export function InlineMentionDropdown({ anchorRef, onSelect }: InlineMentionDrop
     position: 'fixed',
     bottom: window.innerHeight - anchorRect.top + 8,
     left: anchorRect.left,
-    width: anchorRect.width,
-    maxHeight: 320,
+    width: Math.min(anchorRect.width, 360),
+    maxHeight: 280,
     zIndex: 100,
   };
 
@@ -71,34 +71,33 @@ export function InlineMentionDropdown({ anchorRef, onSelect }: InlineMentionDrop
   const content = (
     <div
       style={dropdownStyle}
-      className="bg-[#1e1e1e] border border-white/10 rounded-lg shadow-xl overflow-hidden flex flex-col"
+      className="bg-[#161616] border border-white/[0.06] rounded-lg shadow-2xl overflow-hidden flex flex-col backdrop-blur-xl"
+      role="listbox"
+      aria-label="File and folder suggestions"
+      aria-expanded={isMentionOpen}
+      aria-activedescendant={flatList.length > 0 ? `mention-option-${selectedMentionIndex}` : undefined}
     >
-      {/* Header */}
-      <div className="px-3 py-2 border-b border-white/5 text-xs text-gray-400">
-        {mentionQuery ? (
-          <>Searching for "{mentionQuery}"...</>
-        ) : (
-          <>Type to search files and folders</>
-        )}
+      {/* Search indicator */}
+      <div className="px-3 py-2 text-[11px] text-gray-500 border-b border-white/[0.04]">
+        {mentionQuery ? `"${mentionQuery}"` : 'Search files & folders'}
       </div>
 
       {/* Results */}
-      <div ref={listRef} className="overflow-y-auto flex-1 py-1">
+      <div ref={listRef} className="overflow-y-auto flex-1">
         {isMentionLoading ? (
-          <div className="flex items-center justify-center gap-2 py-4 text-sm text-gray-400">
-            <Loader2 size={14} className="animate-spin" />
-            <span>Searching...</span>
+          <div className="flex items-center justify-center gap-2 py-6 text-xs text-gray-500" role="status" aria-live="polite">
+            <Loader2 size={12} className="animate-spin" aria-hidden="true" />
           </div>
         ) : flatList.length === 0 ? (
-          <div className="px-3 py-4 text-sm text-gray-500 text-center">
-            {mentionQuery ? 'No matches found' : 'No files in current directory'}
+          <div className="px-3 py-6 text-xs text-gray-600 text-center">
+            {mentionQuery ? 'No results' : 'Empty'}
           </div>
         ) : (
           <>
             {/* Folders section */}
             {folders.length > 0 && (
-              <div className="mb-1">
-                <div className="px-3 py-1 text-[10px] uppercase tracking-wider text-gray-500 font-medium">
+              <div>
+                <div className="px-3 py-1.5 text-[10px] uppercase tracking-wide text-gray-600">
                   Folders
                 </div>
                 {folders.map((item, idx) => {
@@ -107,18 +106,17 @@ export function InlineMentionDropdown({ anchorRef, onSelect }: InlineMentionDrop
                   return (
                     <div
                       key={item.path}
+                      id={`mention-option-${globalIndex}`}
                       ref={isSelected ? selectedRef : null}
                       onClick={() => onSelect(item)}
+                      role="option"
+                      aria-selected={isSelected}
                       className={`
-                        flex items-center gap-2 px-3 py-1.5 cursor-pointer text-sm
-                        ${isSelected ? 'bg-orange-500/20 text-orange-300' : 'text-gray-300 hover:bg-white/5'}
+                        px-3 py-1.5 cursor-pointer text-[13px] truncate
+                        ${isSelected ? 'bg-white/[0.06] text-gray-200' : 'text-gray-400 hover:bg-white/[0.03] hover:text-gray-300'}
                       `}
                     >
-                      <Folder size={14} className="text-blue-400 flex-shrink-0" />
-                      <span className="truncate flex-1">{item.name}</span>
-                      <span className="text-[10px] text-gray-500 bg-white/5 px-1.5 py-0.5 rounded">
-                        hologram
-                      </span>
+                      {item.name}
                     </div>
                   );
                 })}
@@ -128,7 +126,7 @@ export function InlineMentionDropdown({ anchorRef, onSelect }: InlineMentionDrop
             {/* Files section */}
             {files.length > 0 && (
               <div>
-                <div className="px-3 py-1 text-[10px] uppercase tracking-wider text-gray-500 font-medium">
+                <div className="px-3 py-1.5 text-[10px] uppercase tracking-wide text-gray-600">
                   Files
                 </div>
                 {files.map((item, idx) => {
@@ -137,14 +135,16 @@ export function InlineMentionDropdown({ anchorRef, onSelect }: InlineMentionDrop
                   return (
                     <div
                       key={item.path}
+                      id={`mention-option-${globalIndex}`}
                       ref={isSelected ? selectedRef : null}
                       onClick={() => onSelect(item)}
+                      role="option"
+                      aria-selected={isSelected}
                       className={`
-                        flex items-center gap-2 px-3 py-1.5 cursor-pointer text-sm
-                        ${isSelected ? 'bg-orange-500/20 text-orange-300' : 'text-gray-300 hover:bg-white/5'}
+                        flex items-center px-3 py-1.5 cursor-pointer text-[13px]
+                        ${isSelected ? 'bg-white/[0.06] text-gray-200' : 'text-gray-400 hover:bg-white/[0.03] hover:text-gray-300'}
                       `}
                     >
-                      <File size={14} className="text-gray-500 flex-shrink-0" />
                       <span className="truncate">{item.name}</span>
                     </div>
                   );
@@ -155,17 +155,11 @@ export function InlineMentionDropdown({ anchorRef, onSelect }: InlineMentionDrop
         )}
       </div>
 
-      {/* Footer with keyboard hints */}
-      <div className="px-3 py-1.5 border-t border-white/5 text-[10px] text-gray-500 flex items-center gap-3">
-        <span>
-          <kbd className="px-1 py-0.5 bg-white/5 rounded">↑↓</kbd> navigate
-        </span>
-        <span>
-          <kbd className="px-1 py-0.5 bg-white/5 rounded">Enter</kbd> select
-        </span>
-        <span>
-          <kbd className="px-1 py-0.5 bg-white/5 rounded">Esc</kbd> close
-        </span>
+      {/* Minimal footer */}
+      <div className="px-3 py-1.5 border-t border-white/[0.04] text-[10px] text-gray-600 flex items-center gap-4">
+        <span><kbd className="text-gray-500">↑↓</kbd> nav</span>
+        <span><kbd className="text-gray-500">↵</kbd> select</span>
+        <span><kbd className="text-gray-500">esc</kbd> close</span>
       </div>
     </div>
   );

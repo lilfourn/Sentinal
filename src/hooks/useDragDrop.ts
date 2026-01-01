@@ -10,6 +10,8 @@ interface UseDragDropOptions {
   onDropComplete?: (newPaths: string[], isCopy: boolean) => void;
   /** Callback on drop error */
   onDropError?: (error: string) => void;
+  /** Callback when drag is cancelled (dropped on blank space or Escape pressed) */
+  onDragCancel?: () => void;
 }
 
 interface UseDragDropReturn {
@@ -18,16 +20,16 @@ interface UseDragDropReturn {
   /** Currently hovered drop target */
   dropTarget: DropTarget | null;
 
-  /** Start dragging - call from onMouseDown when initiating drag */
+  /** Start dragging - call from native onDragStart */
   startDrag: (items: FileEntry[], sourceDirectory: string) => void;
-  /** Update drag position - called automatically from global mousemove */
-  updateDragPosition: (x: number, y: number, altKey: boolean) => void;
   /** Set current drop target - call when hovering over a directory */
   setDropTarget: (path: string | null, isDirectory: boolean) => void;
-  /** Execute the drop - call from onMouseUp on valid target */
-  executeDrop: () => Promise<boolean>;
+  /** Execute the drop - call from native onDrop. Pass targetPath to override state. */
+  executeDrop: (targetPath?: string) => Promise<boolean>;
   /** Cancel the drag */
   cancelDrag: () => void;
+  /** Set copy mode (Alt key held) */
+  setCopyMode: (isCopy: boolean) => void;
 
   /** Check if currently dragging */
   isDragging: boolean;
@@ -36,33 +38,26 @@ interface UseDragDropReturn {
 }
 
 export function useDragDrop(options: UseDragDropOptions = {}): UseDragDropReturn {
-  const { onDropComplete, onDropError } = options;
+  const { onDropComplete, onDropError, onDragCancel } = options;
 
   const [dragState, setDragState] = useState<DragState | null>(null);
   const [dropTarget, setDropTargetState] = useState<DropTarget | null>(null);
 
   const startDrag = useCallback(
     (items: FileEntry[], sourceDirectory: string) => {
+      console.log('[DragDrop] startDrag:', { items: items.map(i => i.path), sourceDirectory });
       setDragState({
         items,
         sourceDirectory,
         isCopy: false,
-        position: { x: 0, y: 0 },
+        position: { x: 0, y: 0 }, // Position no longer used but kept for type compatibility
       });
     },
     []
   );
 
-  const updateDragPosition = useCallback((x: number, y: number, altKey: boolean) => {
-    setDragState((prev) =>
-      prev
-        ? {
-            ...prev,
-            position: { x, y },
-            isCopy: altKey,
-          }
-        : null
-    );
+  const setCopyMode = useCallback((isCopy: boolean) => {
+    setDragState((prev) => (prev ? { ...prev, isCopy } : null));
   }, []);
 
   const setDropTarget = useCallback(
@@ -110,18 +105,35 @@ export function useDragDrop(options: UseDragDropOptions = {}): UseDragDropReturn
     [dragState]
   );
 
-  const executeDrop = useCallback(async (): Promise<boolean> => {
-    if (!dragState || !dropTarget?.isValid) {
+  const executeDrop = useCallback(async (targetPath?: string): Promise<boolean> => {
+    console.log('[DragDrop] executeDrop called:', { targetPath, hasDragState: !!dragState, dropTarget });
+
+    if (!dragState) {
+      console.log('[DragDrop] executeDrop: No dragState, returning false');
+      return false;
+    }
+
+    // Use provided targetPath or fall back to dropTarget state
+    const finalTarget = targetPath || dropTarget?.path;
+    if (!finalTarget) {
+      console.log('[DragDrop] executeDrop: No finalTarget, returning false');
+      return false;
+    }
+
+    // If using state, check validity; if path provided directly, trust caller
+    if (!targetPath && !dropTarget?.isValid) {
+      console.log('[DragDrop] executeDrop: Invalid drop target, returning false');
       return false;
     }
 
     const sourcePaths = dragState.items.map((item) => item.path);
     const command = dragState.isCopy ? 'copy_files_batch' : 'move_files_batch';
+    console.log('[DragDrop] executeDrop: Executing', { command, sourcePaths, finalTarget });
 
     try {
       const newPaths = await invoke<string[]>(command, {
         sources: sourcePaths,
-        targetDirectory: dropTarget.path,
+        targetDirectory: finalTarget,
       });
 
       onDropComplete?.(newPaths, dragState.isCopy);
@@ -143,17 +155,15 @@ export function useDragDrop(options: UseDragDropOptions = {}): UseDragDropReturn
   }, [dragState, dropTarget, onDropComplete, onDropError]);
 
   const cancelDrag = useCallback(() => {
+    console.log('[DragDrop] cancelDrag called');
     setDragState(null);
     setDropTargetState(null);
-  }, []);
+    onDragCancel?.();
+  }, [onDragCancel]);
 
-  // Global mouse and keyboard event handlers
+  // Global keyboard event handlers for drag operations
   useEffect(() => {
     if (!dragState) return;
-
-    const handleMouseMove = (e: MouseEvent) => {
-      updateDragPosition(e.clientX, e.clientY, e.altKey);
-    };
 
     const handleKeyDown = (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
@@ -161,42 +171,43 @@ export function useDragDrop(options: UseDragDropOptions = {}): UseDragDropReturn
       }
       // Update copy mode on Alt key
       if (e.key === 'Alt') {
-        setDragState((prev) => (prev ? { ...prev, isCopy: true } : null));
+        setCopyMode(true);
       }
     };
 
     const handleKeyUp = (e: KeyboardEvent) => {
       if (e.key === 'Alt') {
-        setDragState((prev) => (prev ? { ...prev, isCopy: false } : null));
+        setCopyMode(false);
       }
     };
 
     // Handle losing focus (e.g., switching windows)
-    const handleBlur = () => {
-      cancelDrag();
-    };
+    // DISABLED: This was causing issues with Tauri drag-and-drop
+    // The blur event fires during native drag operations on some systems
+    // const handleBlur = () => {
+    //   console.log('[DragDrop] Window blur detected - cancelling drag');
+    //   cancelDrag();
+    // };
 
-    document.addEventListener('mousemove', handleMouseMove);
     document.addEventListener('keydown', handleKeyDown);
     document.addEventListener('keyup', handleKeyUp);
-    window.addEventListener('blur', handleBlur);
+    // window.addEventListener('blur', handleBlur);
 
     return () => {
-      document.removeEventListener('mousemove', handleMouseMove);
       document.removeEventListener('keydown', handleKeyDown);
       document.removeEventListener('keyup', handleKeyUp);
-      window.removeEventListener('blur', handleBlur);
+      // window.removeEventListener('blur', handleBlur);
     };
-  }, [dragState, updateDragPosition, cancelDrag]);
+  }, [dragState, cancelDrag, setCopyMode]);
 
   return {
     dragState,
     dropTarget,
     startDrag,
-    updateDragPosition,
     setDropTarget,
     executeDrop,
     cancelDrag,
+    setCopyMode,
     isDragging: dragState !== null,
     isValidTarget: dropTarget?.isValid ?? false,
   };

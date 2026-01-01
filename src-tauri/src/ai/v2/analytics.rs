@@ -17,6 +17,7 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use super::local_vector_index::LocalVectorIndex;
+use crate::utils::format_size;
 
 /// Maximum content preview length per file (characters)
 const MAX_PREVIEW_LENGTH: usize = 200;
@@ -616,23 +617,6 @@ fn is_previewable(ext: &str) -> bool {
             | "rb"
             | "php"
     )
-}
-
-/// Format bytes as human-readable size
-fn format_size(bytes: u64) -> String {
-    const KB: u64 = 1024;
-    const MB: u64 = KB * 1024;
-    const GB: u64 = MB * 1024;
-
-    if bytes >= GB {
-        format!("{:.1}GB", bytes as f64 / GB as f64)
-    } else if bytes >= MB {
-        format!("{:.1}MB", bytes as f64 / MB as f64)
-    } else if bytes >= KB {
-        format!("{:.0}KB", bytes as f64 / KB as f64)
-    } else {
-        format!("{}B", bytes)
-    }
 }
 
 #[cfg(test)]

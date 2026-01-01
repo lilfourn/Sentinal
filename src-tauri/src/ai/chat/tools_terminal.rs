@@ -8,7 +8,7 @@
 //! - Uses std::process::Command with argument separation (no shell interpolation)
 //! - Path validation against protected directories
 
-use crate::security::{safe_regex, CommandSandbox, PathValidator};
+use crate::security::{safe_regex, CommandSandbox, CommandSandboxErrorKind, PathValidator, ShellPermissions};
 use serde_json::{json, Value};
 use std::path::Path;
 use std::time::Duration;
@@ -17,22 +17,96 @@ use tokio::time::timeout;
 const MAX_OUTPUT_CHARS: usize = 30_000;
 const COMMAND_TIMEOUT_SECS: u64 = 5;
 
+/// Convert a pipe-separated pattern to multiple patterns for ripgrep -e flags
+/// Only splits on `|` when it's NOT inside parentheses (to preserve regex groups)
+///
+/// Examples:
+/// - "cover letter|coverletter" → ["cover letter", "coverletter"]
+/// - "(cover|application)" → ["(cover|application)"] (preserved as regex)
+/// - "cover letter|(resume|CV)" → ["cover letter", "(resume|CV)"]
+fn convert_pipe_pattern_to_multi(pattern: &str) -> Vec<String> {
+    // If pattern contains parentheses with pipe inside, it's likely a regex group
+    // Check if all pipes are within balanced parentheses
+    let mut depth: usize = 0;
+    let mut has_unescaped_pipe_outside_parens = false;
+
+    for c in pattern.chars() {
+        match c {
+            '(' => depth += 1,
+            ')' => depth = depth.saturating_sub(1),
+            '|' if depth == 0 => {
+                has_unescaped_pipe_outside_parens = true;
+                break;
+            }
+            _ => {}
+        }
+    }
+
+    // Only split if there are pipes outside parentheses
+    if has_unescaped_pipe_outside_parens {
+        // Split carefully, preserving parenthesized groups
+        let mut result = Vec::new();
+        let mut current = String::new();
+        let mut paren_depth: usize = 0;
+
+        for c in pattern.chars() {
+            match c {
+                '(' => {
+                    paren_depth += 1;
+                    current.push(c);
+                }
+                ')' => {
+                    paren_depth = paren_depth.saturating_sub(1);
+                    current.push(c);
+                }
+                '|' if paren_depth == 0 => {
+                    let trimmed = current.trim().to_string();
+                    if !trimmed.is_empty() {
+                        result.push(trimmed);
+                    }
+                    current.clear();
+                }
+                _ => current.push(c),
+            }
+        }
+
+        // Don't forget the last segment
+        let trimmed = current.trim().to_string();
+        if !trimmed.is_empty() {
+            result.push(trimmed);
+        }
+
+        if result.is_empty() {
+            vec![pattern.to_string()]
+        } else {
+            result
+        }
+    } else {
+        // No pipes outside parentheses - treat as single regex pattern
+        vec![pattern.to_string()]
+    }
+}
+
 /// Tool definitions for Anthropic API
 pub fn get_terminal_tools() -> Vec<Value> {
     vec![
         json!({
             "name": "shell",
-            "description": "Execute a safe shell command. ALLOWED: ls, find, file, du, wc, head, tail, cat, less, grep, rg, git status, git log. Output truncated if too long. NO destructive commands.",
+            "description": "Execute a safe shell command. ALLOWED: ls, find (-name/-iname), file, du, wc, head, tail, cat, less, grep, rg, git status, git log. Output truncated if too long. NO destructive commands.",
             "input_schema": {
                 "type": "object",
                 "properties": {
                     "command": {
                         "type": "string",
-                        "description": "The command to execute (e.g., 'ls -la', 'find . -name \"*.rs\"', 'git status')"
+                        "description": "The command to execute (e.g., 'ls -la', 'find . -iname \"*.pdf\"', 'git status')"
                     },
                     "working_dir": {
                         "type": "string",
                         "description": "Optional working directory for the command"
+                    },
+                    "force": {
+                        "type": "boolean",
+                        "description": "If true, bypass safety checks for user-approved commands. Only use when user has explicitly approved the command."
                     }
                 },
                 "required": ["command"]
@@ -90,13 +164,38 @@ pub async fn execute_shell(input: &Value) -> Result<String, String> {
         }
     }
 
+    // Check if force mode is requested (user approved the command)
+    let force_mode = input
+        .get("force")
+        .and_then(|f| f.as_bool())
+        .unwrap_or(false);
+
+    // Load shell permissions to check if command is pre-approved
+    let permissions = ShellPermissions::load();
+    let is_pre_approved = permissions.is_allowed(command);
+
     // Create sandbox with working directory as root
-    let sandbox = CommandSandbox::new(working_dir.map(|d| d.into()));
+    let sandbox = CommandSandbox::new(working_dir.map(|d| d.into()))
+        .with_force_mode(force_mode || is_pre_approved);
 
     // Parse command through allowlist
-    let allowed_cmd = sandbox
-        .parse_command(command)
-        .map_err(|e| format!("Command not allowed: {}", e))?;
+    let allowed_cmd = match sandbox.parse_command(command) {
+        Ok(cmd) => cmd,
+        Err(e) => {
+            // Check if this is an approvable command
+            if let CommandSandboxErrorKind::NeedsApproval { command: cmd, reason } = &e.kind {
+                // Return structured error for frontend to prompt user
+                // Format: NEEDS_APPROVAL|command|reason|message
+                return Err(format!(
+                    "NEEDS_APPROVAL|{}|{}|{}",
+                    cmd.replace('|', "\\|"),
+                    reason.replace('|', "\\|"),
+                    e.message.replace('|', "\\|")
+                ));
+            }
+            return Err(format!("Command not allowed: {}", e));
+        }
+    };
 
     eprintln!("[TerminalTool] Executing safe command: {:?}", allowed_cmd);
 
@@ -157,8 +256,14 @@ pub async fn execute_grep(input: &Value) -> Result<String, String> {
         .and_then(|m| m.as_u64())
         .unwrap_or(50) as usize;
 
-    // Validate regex pattern to prevent ReDoS
-    safe_regex(pattern).map_err(|e| format!("Invalid regex pattern: {}", e))?;
+    // Convert pipe-separated patterns to multiple patterns
+    // "cover letter|coverletter" → ["-e", "cover letter", "-e", "coverletter"]
+    let patterns = convert_pipe_pattern_to_multi(pattern);
+
+    // Validate each regex pattern to prevent ReDoS
+    for p in &patterns {
+        safe_regex(p).map_err(|e| format!("Invalid regex pattern '{}': {}", p, e))?;
+    }
 
     // Validate path
     let search_path = Path::new(path);
@@ -170,12 +275,12 @@ pub async fn execute_grep(input: &Value) -> Result<String, String> {
     }
 
     eprintln!(
-        "[TerminalTool] Executing grep: pattern='{}' path='{}' include={:?}",
-        pattern, path, include
+        "[TerminalTool] Executing grep: patterns={:?} path='{}' include={:?}",
+        patterns, path, include
     );
 
     // Convert to owned strings for move into closure
-    let pattern_owned = pattern.to_string();
+    let patterns_owned = patterns.clone();
     let path_owned = path.to_string();
 
     // Use ripgrep with proper argument separation (no shell interpolation)
@@ -183,12 +288,17 @@ pub async fn execute_grep(input: &Value) -> Result<String, String> {
         let mut cmd = std::process::Command::new("rg");
 
         // Add arguments safely - each as separate argument, not string interpolation
-        cmd.arg("-n")                  // Line numbers
-            .arg("--no-heading")       // No file headers
+        cmd.arg("-n") // Line numbers
+            .arg("--no-heading") // No file headers
             .arg("--max-count")
-            .arg(max_results.to_string())
-            .arg(&pattern_owned)       // Pattern as separate arg
-            .arg(&path_owned);         // Path as separate arg
+            .arg(max_results.to_string());
+
+        // Add each pattern with -e flag (allows multiple patterns without shell |)
+        for p in &patterns_owned {
+            cmd.arg("-e").arg(p);
+        }
+
+        cmd.arg(&path_owned); // Path as separate arg
 
         // Add include glob if specified
         if let Some(ref inc) = include {
@@ -215,11 +325,19 @@ pub async fn execute_grep(input: &Value) -> Result<String, String> {
             }
             Err(e) => {
                 // If ripgrep not available, fall back to grep with same safety
-                eprintln!("[TerminalTool] rg not available, falling back to grep: {}", e);
+                eprintln!(
+                    "[TerminalTool] rg not available, falling back to grep: {}",
+                    e
+                );
                 let mut fallback = std::process::Command::new("grep");
-                fallback.arg("-rn")
-                    .arg(&pattern_owned)
-                    .arg(&path_owned);
+                fallback.arg("-rn");
+
+                // Add each pattern with -e flag for grep too
+                for p in &patterns_owned {
+                    fallback.arg("-e").arg(p);
+                }
+
+                fallback.arg(&path_owned);
 
                 if let Some(ref inc) = include {
                     fallback.arg("--include").arg(inc);

@@ -24,6 +24,8 @@ import { useOrganizeStore } from '../../stores/organize-store';
 import { useGhostStore } from '../../stores/ghost-store';
 import { useMarqueeSelection } from '../../hooks/useMarqueeSelection';
 import { useDelete } from '../../hooks/useDelete';
+import { useNativeDrag } from '../../hooks/useNativeDrag';
+import { createDragGhost } from '../../lib/drag-visuals';
 import { cn, getFileType, openFile } from '../../lib/utils';
 import type { FileEntry } from '../../types/file';
 import '../ghost/GhostAnimations.css';
@@ -71,6 +73,14 @@ export function FileColumnsView({ entries }: FileColumnsViewProps) {
     executeDrop,
     isDragging: isDragDropActive,
   } = useDragDropContext();
+
+  // Native drag hooks for spring loading and anti-flicker
+  const {
+    handleDragEnter: nativeDragEnter,
+    handleDragLeave: nativeDragLeave,
+    handleDrop: nativeDragDrop,
+    dragCounter,
+  } = useNativeDrag();
 
   // Refresh directory after changes
   const refreshDirectory = useCallback(() => {
@@ -205,38 +215,96 @@ export function FileColumnsView({ entries }: FileColumnsViewProps) {
     requestDelete(path);
   }, [requestDelete]);
 
-  // Handle drag start on an item
+  // Handle native HTML5 drag start on an item
   const handleDragStart = useCallback(
-    (entry: FileEntry, e: React.MouseEvent) => {
-      e.preventDefault();
+    (entry: FileEntry, e: React.DragEvent) => {
+      console.log('[FileColumnsView] handleDragStart:', { path: entry.path, isDirectory: entry.isDirectory });
+      // Get all selected items, or just this one if not selected
       const itemsToDrag = selectedPaths.has(entry.path)
-        ? entries.filter((e) => selectedPaths.has(e.path))
+        ? entries.filter((ent) => selectedPaths.has(ent.path))
         : [entry];
 
+      // 1. Set sentinel/* data for chat panel compatibility
+      e.dataTransfer.setData('sentinel/path', entry.path);
+      e.dataTransfer.setData('sentinel/type', entry.isDirectory ? 'folder' : 'file');
+      e.dataTransfer.setData('sentinel/name', entry.name);
+      e.dataTransfer.setData('sentinel/size', String(entry.size || 0));
+      if (entry.mimeType) {
+        e.dataTransfer.setData('sentinel/mime', entry.mimeType);
+      }
+
+      // 2. Set text/uri-list for external app support (Finder, VS Code, etc.)
+      const uriList = itemsToDrag.map((f) => `file://${f.path}`).join('\r\n');
+      e.dataTransfer.setData('text/uri-list', uriList);
+      e.dataTransfer.setData('text/plain', uriList);
+
+      // 3. Set internal app data (for multi-file operations)
+      e.dataTransfer.setData('sentinel/json', JSON.stringify(itemsToDrag.map((f) => f.path)));
+      e.dataTransfer.effectAllowed = 'copyMove';
+
+      // 4. Create native drag image (stacked cards)
+      const ghost = createDragGhost(itemsToDrag);
+      document.body.appendChild(ghost);
+      e.dataTransfer.setDragImage(ghost, 16, 16);
+      // Cleanup after browser captures the image
+      requestAnimationFrame(() => ghost.remove());
+
+      // 5. Start drag in context (for validation and execution)
       startFileDrag(itemsToDrag, currentPath);
     },
     [selectedPaths, entries, currentPath, startFileDrag]
   );
 
-  // Handle drag entering a directory
+  // Handle native drag entering a directory (for drop target highlighting)
   const handleDragEnter = useCallback(
-    (entry: FileEntry) => {
-      if (entry.isDirectory && isDragDropActive) {
+    (entry: FileEntry, e: React.DragEvent) => {
+      e.preventDefault();
+      nativeDragEnter(entry.path, entry.isDirectory);
+
+      if (entry.isDirectory && dragCounter.current === 1) {
         setDropTarget(entry.path, true);
       }
     },
-    [isDragDropActive, setDropTarget]
+    [nativeDragEnter, dragCounter, setDropTarget]
+  );
+
+  // Handle native drag over (required to allow drop)
+  const handleDragOver = useCallback(
+    (_entry: FileEntry, e: React.DragEvent) => {
+      e.preventDefault();
+      // Set copy/move based on Alt key
+      e.dataTransfer.dropEffect = e.altKey ? 'copy' : 'move';
+    },
+    []
+  );
+
+  // Handle native drag leave
+  const handleDragLeave = useCallback(
+    (entry: FileEntry, _e: React.DragEvent) => {
+      nativeDragLeave();
+
+      if (entry.isDirectory && dragCounter.current === 0) {
+        setDropTarget(null, false);
+      }
+    },
+    [nativeDragLeave, dragCounter, setDropTarget]
   );
 
   // Handle dropping on a directory
   const handleDrop = useCallback(
-    async (entry: FileEntry) => {
-      if (entry.isDirectory && isDragDropActive) {
-        setDropTarget(entry.path, true);
-        await executeDrop();
+    async (entry: FileEntry, e: React.DragEvent) => {
+      e.preventDefault();
+      console.log('[FileColumnsView] handleDrop:', { path: entry.path, isDirectory: entry.isDirectory });
+      nativeDragDrop();
+
+      if (entry.isDirectory) {
+        // Pass target path directly to avoid async state timing issues
+        const result = await executeDrop(entry.path);
+        console.log('[FileColumnsView] executeDrop result:', result);
+        setDropTarget(null, false);
       }
     },
-    [isDragDropActive, setDropTarget, executeDrop]
+    [nativeDragDrop, executeDrop, setDropTarget]
   );
 
   // Clear drop target when mouse leaves
@@ -268,41 +336,16 @@ export function FileColumnsView({ entries }: FileColumnsViewProps) {
           const linkedPath = ghostInfo?.linkedPath;
           const ghostClasses = getGhostClasses(ghostState);
 
-          // Drag initiation handler
-          const handleMouseDown = (e: React.MouseEvent) => {
-            if (e.button !== 0) return;
-
-            const startX = e.clientX;
-            const startY = e.clientY;
-            const threshold = 5;
-
-            const onMouseMove = (moveEvent: MouseEvent) => {
-              const deltaX = Math.abs(moveEvent.clientX - startX);
-              const deltaY = Math.abs(moveEvent.clientY - startY);
-
-              if (deltaX > threshold || deltaY > threshold) {
-                document.removeEventListener('mousemove', onMouseMove);
-                document.removeEventListener('mouseup', onMouseUp);
-                handleDragStart(entry, e);
-              }
-            };
-
-            const onMouseUp = () => {
-              document.removeEventListener('mousemove', onMouseMove);
-              document.removeEventListener('mouseup', onMouseUp);
-            };
-
-            document.addEventListener('mousemove', onMouseMove);
-            document.addEventListener('mouseup', onMouseUp);
-          };
-
           return (
             <div
               key={entry.path}
               data-path={entry.path}
-              onMouseDown={handleMouseDown}
-              onMouseEnter={() => entry.isDirectory && handleDragEnter(entry)}
-              onMouseUp={() => entry.isDirectory && handleDrop(entry)}
+              draggable={true}
+              onDragStart={(e) => handleDragStart(entry, e)}
+              onDragEnter={(e) => entry.isDirectory && handleDragEnter(entry, e)}
+              onDragOver={(e) => entry.isDirectory && handleDragOver(entry, e)}
+              onDragLeave={(e) => entry.isDirectory && handleDragLeave(entry, e)}
+              onDrop={(e) => entry.isDirectory && handleDrop(entry, e)}
               onClick={(e) => handleClick(entry, e)}
               onDoubleClick={() => handleDoubleClick(entry)}
               onContextMenu={(e) => handleContextMenu(entry, e)}

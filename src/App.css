@@ -262,3 +262,56 @@
 .thinking-pulse {
   animation: thinking-pulse 2s ease-in-out infinite;
 }
+
+/* ============================================================================
+   REDUCED MOTION PREFERENCES
+   Respects user's system preference for reduced motion
+   ============================================================================ */
+
+@media (prefers-reduced-motion: reduce) {
+  /* Disable all animations */
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+
+  /* Keep minimal visual feedback for streaming */
+  .streaming-shimmer::after {
+    animation: none;
+    background: transparent;
+  }
+
+  /* Static cursor instead of blinking */
+  .animate-cursor-blink {
+    animation: none;
+    opacity: 1;
+  }
+
+  /* Static shimmer text */
+  .shimmer-text {
+    animation: none;
+    background: #9ca3af;
+    -webkit-text-fill-color: #9ca3af;
+  }
+
+  /* Static thinking dots */
+  .thinking-dot-1,
+  .thinking-dot-2,
+  .thinking-dot-3 {
+    animation: none;
+  }
+
+  /* Static thinking pulse */
+  .thinking-pulse {
+    animation: none;
+    opacity: 1;
+  }
+
+  /* Disable smooth scrolling */
+  html {
+    scroll-behavior: auto;
+  }
+}

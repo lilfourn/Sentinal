@@ -8,16 +8,25 @@ pub mod quarantine;
 mod security;
 mod services;
 mod tree;
+pub mod utils;
 mod vector;
 pub mod vfs;
 mod wal;
 
 use commands::*;
+use commands::grok::GrokState;
 use services::watcher::create_watcher_handle;
 use tracing_subscriber::EnvFilter;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // Load .env file - try multiple locations
+    // During `tauri dev`, CWD is project root; check current dir first
+    if dotenvy::dotenv().is_err() {
+        // Fallback: check parent directory (if running from src-tauri)
+        let _ = dotenvy::from_path("../.env");
+    }
+
     // Initialize tracing with RUST_LOG env filter
     // Default: warn for most crates, info for our app (job summaries visible)
     // Use RUST_LOG=debug for verbose per-operation logs
@@ -35,6 +44,7 @@ pub fn run() {
     let quarantine_state = create_quarantine_state()
         .expect("Failed to create quarantine manager");
     let chat_abort_flag = ChatAbortFlag::default();
+    let grok_state = GrokState::default();
 
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
@@ -47,6 +57,7 @@ pub fn run() {
         .manage(vfs_state)
         .manage(quarantine_state)
         .manage(chat_abort_flag)
+        .manage(grok_state)
         .invoke_handler(tauri::generate_handler![
             // Filesystem commands
             read_directory,
@@ -98,6 +109,11 @@ pub fn run() {
             check_path_permission,
             get_protected_directories,
             open_privacy_settings,
+            // Shell permission commands
+            get_shell_permissions,
+            allow_shell_command,
+            revoke_shell_command,
+            check_shell_command,
             // Photo commands
             scan_photos,
             get_photo_directories,
@@ -152,6 +168,16 @@ pub fn run() {
             abort_chat,
             reset_chat_abort,
             list_files_for_mention,
+            // Grok AI commands
+            grok_init,
+            grok_scan_folder,
+            grok_organize,
+            grok_analyze_file,
+            grok_cache_stats,
+            grok_clear_cache,
+            grok_check_api_key,
+            grok_set_api_key,
+            grok_get_api_key,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
