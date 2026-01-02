@@ -18,10 +18,11 @@ import {
   useOrganizeStore,
   type AIThought,
   type ThoughtType,
+  type ExecutionError,
 } from '../../stores/organize-store';
 import { ConventionSelector } from './ConventionSelector';
-import { ContentAnalysisDialog } from './ContentAnalysisDialog';
-import { InstructionInput } from './InstructionInput';
+import { ErrorDetailDialog } from './ErrorDetailDialog';
+import { OrganizeMethodSelector } from './OrganizeMethodSelector';
 import { DynamicStatus } from './DynamicStatus';
 import { SimulationControls } from './SimulationControls';
 import { ExecutionProgress } from './ExecutionProgress';
@@ -40,7 +41,6 @@ export function ChangesPanel() {
     isAnalyzing,
     executedOps,
     closeOrganizer,
-    userInstruction,
     setUserInstruction,
     submitInstruction,
     awaitingInstruction,
@@ -55,22 +55,13 @@ export function ChangesPanel() {
     acceptPlanParallel,
     rejectPlan,
     analysisProgress,
+    executionErrors,
   } = useOrganizeStore();
 
   const scrollRef = useRef<HTMLDivElement>(null);
 
-  // Track whether content analysis has been completed or skipped
-  const [contentAnalysisComplete, setContentAnalysisComplete] = useState(false);
-
-  // Reset content analysis state when a new folder is opened
-  useEffect(() => {
-    if (isOpen && targetFolder) {
-      setContentAnalysisComplete(false);
-    }
-  }, [isOpen, targetFolder]);
-
-  // Show content analysis dialog when awaiting instruction and analysis not done
-  const showContentAnalysis = awaitingInstruction && !contentAnalysisComplete && targetFolder;
+  // Track whether error detail dialog is shown
+  const [showErrorDialog, setShowErrorDialog] = useState(false);
 
   // Auto-scroll to bottom when new thoughts arrive
   useEffect(() => {
@@ -137,21 +128,14 @@ export function ChangesPanel() {
             />
           )}
 
-          {/* Content Analysis Dialog - shown before instruction input */}
-          {showContentAnalysis && targetFolder && (
-            <ContentAnalysisDialog
-              folderPath={targetFolder}
-              onComplete={() => setContentAnalysisComplete(true)}
-              onSkip={() => setContentAnalysisComplete(true)}
-            />
-          )}
-
-          {/* V6: User Instruction Input - shown after content analysis */}
-          {awaitingInstruction && contentAnalysisComplete && (
-            <InstructionInput
-              instruction={userInstruction}
-              onInstructionChange={setUserInstruction}
-              onSubmit={submitInstruction}
+          {/* Organization Method Selector - shown when awaiting user instruction */}
+          {awaitingInstruction && (
+            <OrganizeMethodSelector
+              onSelect={(instruction) => {
+                setUserInstruction(instruction);
+                // Small delay to ensure state is set before submit
+                setTimeout(submitInstruction, 0);
+              }}
               isDisabled={isAnalyzing}
               folderName={folderName}
             />
@@ -234,7 +218,17 @@ export function ChangesPanel() {
         currentPhase={currentPhase}
         errorDetail={analysisError}
         latestEvent={latestEvent}
+        executionErrors={executionErrors}
+        onViewErrors={() => setShowErrorDialog(true)}
       />
+
+      {/* Error detail dialog */}
+      {showErrorDialog && executionErrors.length > 0 && (
+        <ErrorDetailDialog
+          errors={executionErrors}
+          onClose={() => setShowErrorDialog(false)}
+        />
+      )}
     </div>
   );
 }
@@ -389,6 +383,8 @@ function StatusFooter({
   currentPhase,
   errorDetail,
   latestEvent,
+  executionErrors,
+  onViewErrors,
 }: {
   isComplete: boolean;
   hasError: boolean;
@@ -396,6 +392,8 @@ function StatusFooter({
   currentPhase: ThoughtType;
   errorDetail?: string | null;
   latestEvent: { type: string; detail: string } | null;
+  executionErrors: ExecutionError[];
+  onViewErrors: () => void;
 }) {
   if (isComplete) {
     const message = totalCount === 0 ? 'Already organized' : 'Complete';
@@ -431,6 +429,14 @@ function StatusFooter({
               <p className="text-[10px] text-red-400/70 mt-1 line-clamp-3 break-words">
                 {errorDetail}
               </p>
+            )}
+            {executionErrors.length > 0 && (
+              <button
+                onClick={onViewErrors}
+                className="mt-2 text-[10px] text-red-400 hover:text-red-300 underline transition-colors"
+              >
+                View all {executionErrors.length} error{executionErrors.length !== 1 ? 's' : ''}
+              </button>
             )}
           </div>
         </div>

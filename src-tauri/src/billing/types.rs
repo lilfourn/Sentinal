@@ -157,11 +157,13 @@ pub enum LimitCheckResult {
 
 impl LimitCheckResult {
     /// Check if the request is allowed
+    #[allow(dead_code)]
     pub fn is_allowed(&self) -> bool {
         matches!(self, Self::Allowed { .. })
     }
 
     /// Get the denial reason if denied
+    #[allow(dead_code)]
     pub fn denial_reason(&self) -> Option<&LimitDenialReason> {
         match self {
             Self::Denied { reason, .. } => Some(reason),
@@ -226,6 +228,7 @@ impl std::fmt::Display for LimitDenialReason {
 /// Request to check limits (from frontend)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+#[allow(dead_code)]
 pub struct CheckLimitRequest {
     pub user_id: Option<String>,
     pub model: String,

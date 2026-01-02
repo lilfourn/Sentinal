@@ -11,9 +11,70 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use tauri::{AppHandle, Emitter};
 use tokio::sync::{Mutex, Semaphore};
 
 use super::dag::ExecutionDAG;
+
+/// Extract parent directories affected by an operation for hot reload
+fn get_affected_directories(operation: &WALOperationType) -> Vec<String> {
+    match operation {
+        WALOperationType::Move { source, destination } => {
+            let mut dirs = Vec::new();
+            if let Some(parent) = source.parent() {
+                dirs.push(parent.to_string_lossy().to_string());
+            }
+            if let Some(parent) = destination.parent() {
+                let parent_str = parent.to_string_lossy().to_string();
+                if !dirs.contains(&parent_str) {
+                    dirs.push(parent_str);
+                }
+            }
+            dirs
+        }
+        WALOperationType::CreateFolder { path } => {
+            if let Some(parent) = path.parent() {
+                vec![parent.to_string_lossy().to_string()]
+            } else {
+                vec![]
+            }
+        }
+        WALOperationType::Rename { path, .. } => {
+            if let Some(parent) = path.parent() {
+                vec![parent.to_string_lossy().to_string()]
+            } else {
+                vec![]
+            }
+        }
+        WALOperationType::Quarantine { path, .. } => {
+            if let Some(parent) = path.parent() {
+                vec![parent.to_string_lossy().to_string()]
+            } else {
+                vec![]
+            }
+        }
+        WALOperationType::Copy { source, destination } => {
+            let mut dirs = Vec::new();
+            if let Some(parent) = source.parent() {
+                dirs.push(parent.to_string_lossy().to_string());
+            }
+            if let Some(parent) = destination.parent() {
+                let parent_str = parent.to_string_lossy().to_string();
+                if !dirs.contains(&parent_str) {
+                    dirs.push(parent_str);
+                }
+            }
+            dirs
+        }
+        WALOperationType::DeleteFolder { path } => {
+            if let Some(parent) = path.parent() {
+                vec![parent.to_string_lossy().to_string()]
+            } else {
+                vec![]
+            }
+        }
+    }
+}
 
 /// Maximum number of concurrent filesystem operations
 /// This prevents overwhelming the system with too many parallel I/O operations
@@ -175,6 +236,21 @@ impl ExecutionEngine {
         progress_callback: Option<Arc<ProgressCallback>>,
         config: ExecutionConfig,
     ) -> Result<ExecutionResult, String> {
+        self.execute_journal_with_config_and_events(job_id, progress_callback, config, None)
+            .await
+    }
+
+    /// Execute journal with progress callback, conflict configuration, and real-time events
+    ///
+    /// V7: Supports per-operation events for hot reload UI updates.
+    /// Emits `execution-op-complete` event after each operation with affected directories.
+    pub async fn execute_journal_with_config_and_events(
+        &self,
+        job_id: &str,
+        progress_callback: Option<Arc<ProgressCallback>>,
+        config: ExecutionConfig,
+        app_handle: Option<AppHandle>,
+    ) -> Result<ExecutionResult, String> {
         let journal = self
             .wal_manager
             .load_journal(job_id)?
@@ -201,7 +277,7 @@ impl ExecutionEngine {
             "Built execution DAG"
         );
 
-        self.execute_dag_with_config(&dag, job_id, progress_callback, config)
+        self.execute_dag_with_config_and_events(&dag, job_id, progress_callback, config, app_handle)
             .await
     }
 
@@ -235,6 +311,21 @@ impl ExecutionEngine {
         progress_callback: Option<Arc<ProgressCallback>>,
         config: ExecutionConfig,
     ) -> Result<ExecutionResult, String> {
+        self.execute_dag_with_config_and_events(dag, job_id, progress_callback, config, None)
+            .await
+    }
+
+    /// Execute operations with full configuration support and real-time events
+    ///
+    /// V7: Supports per-operation events for hot reload UI updates.
+    pub async fn execute_dag_with_config_and_events(
+        &self,
+        dag: &ExecutionDAG,
+        job_id: &str,
+        progress_callback: Option<Arc<ProgressCallback>>,
+        config: ExecutionConfig,
+        app_handle: Option<AppHandle>,
+    ) -> Result<ExecutionResult, String> {
         let levels = dag.get_levels_owned();
         let total_ops = dag.len();
         let mut total_completed = 0;
@@ -255,13 +346,14 @@ impl ExecutionEngine {
             let base_completed = total_completed + total_skipped + total_renamed;
 
             let level_result = self
-                .execute_level_with_config(
+                .execute_level_with_config_and_events(
                     level,
                     job_id,
                     &config,
                     progress_callback.clone(),
                     base_completed,
                     total_ops,
+                    app_handle.clone(),
                 )
                 .await?;
 
@@ -305,11 +397,36 @@ impl ExecutionEngine {
     async fn execute_level_with_config(
         &self,
         entries: Vec<WALEntry>,
+        job_id: &str,
+        config: &ExecutionConfig,
+        progress_callback: Option<Arc<ProgressCallback>>,
+        base_completed: usize,
+        total_ops: usize,
+    ) -> Result<LevelResult, String> {
+        self.execute_level_with_config_and_events(
+            entries,
+            job_id,
+            config,
+            progress_callback,
+            base_completed,
+            total_ops,
+            None,
+        )
+        .await
+    }
+
+    /// Execute a single level of operations with conflict configuration and real-time events
+    ///
+    /// V7: Emits per-operation events for hot reload UI updates.
+    async fn execute_level_with_config_and_events(
+        &self,
+        entries: Vec<WALEntry>,
         _job_id: &str,
         config: &ExecutionConfig,
         progress_callback: Option<Arc<ProgressCallback>>,
         base_completed: usize,
         total_ops: usize,
+        app_handle: Option<AppHandle>,
     ) -> Result<LevelResult, String> {
         if entries.is_empty() {
             return Ok(LevelResult::default());
@@ -348,6 +465,7 @@ impl ExecutionEngine {
             let level_processed = Arc::clone(&level_processed);
             let ops_since_emit = Arc::clone(&ops_since_emit);
             let progress_callback = progress_callback.clone();
+            let app_handle = app_handle.clone();
 
             let handle = tokio::spawn(async move {
                 // Acquire semaphore permit to limit concurrency
@@ -362,13 +480,14 @@ impl ExecutionEngine {
                 );
 
                 // Execute the operation with config
-                match execute_operation_with_config(&operation, &config).await {
+                let op_succeeded = match execute_operation_with_config(&operation, &config).await {
                     Ok(outcome) => {
                         match outcome {
                             ExecutionOutcome::Completed => {
                                 let mut c = completed.lock().await;
                                 *c += 1;
                                 tracing::debug!("Operation completed successfully");
+                                true
                             }
                             ExecutionOutcome::CompletedWithRename(new_path) => {
                                 let mut r = renamed.lock().await;
@@ -377,6 +496,7 @@ impl ExecutionEngine {
                                     new_path = %new_path.display(),
                                     "Operation completed with rename"
                                 );
+                                true
                             }
                             ExecutionOutcome::Skipped(reason) => {
                                 let mut s = skipped.lock().await;
@@ -384,6 +504,7 @@ impl ExecutionEngine {
                                 let mut sr = skipped_reasons.lock().await;
                                 sr.push(reason.clone());
                                 tracing::debug!(reason = %reason, "Operation skipped");
+                                false // Skipped ops don't need refresh
                             }
                         }
                     }
@@ -393,6 +514,22 @@ impl ExecutionEngine {
                         let mut e = errors.lock().await;
                         e.push(err.clone());
                         tracing::debug!(error = %err, "Operation failed");
+                        false
+                    }
+                };
+
+                // V7: Emit per-operation event for hot reload (only for successful ops)
+                if op_succeeded {
+                    if let Some(ref app) = app_handle {
+                        let affected_dirs = get_affected_directories(&operation);
+                        if !affected_dirs.is_empty() {
+                            let _ = app.emit(
+                                "execution-op-complete",
+                                serde_json::json!({
+                                    "affectedDirs": affected_dirs,
+                                }),
+                            );
+                        }
                     }
                 }
 

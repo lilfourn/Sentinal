@@ -1,4 +1,4 @@
-use crate::ai::{run_v2_agentic_organize, ExpandableDetail, AnthropicClient, CredentialManager};
+use crate::ai::{run_v2_agentic_organize, ExpandableDetail, ProgressEvent, AnthropicClient, CredentialManager};
 use crate::jobs::OrganizePlan;
 use std::path::Path;
 
@@ -132,32 +132,75 @@ pub struct RenameResult {
     pub new_path: String,
 }
 
+/// Validate that a filename is safe (no path traversal)
+fn validate_filename(name: &str) -> Result<(), String> {
+    // Reject path separators
+    if name.contains('/') || name.contains('\\') || name.contains("..") {
+        return Err("Invalid filename: path separators not allowed".to_string());
+    }
+
+    // Reject control characters and null bytes
+    if name.chars().any(|c| c.is_control() || c == '\0') {
+        return Err("Invalid filename: control characters not allowed".to_string());
+    }
+
+    // Reject empty or whitespace-only names
+    if name.trim().is_empty() {
+        return Err("Invalid filename: cannot be empty".to_string());
+    }
+
+    // Reject names that are too long (filesystem limit)
+    if name.len() > 255 {
+        return Err("Invalid filename: name too long".to_string());
+    }
+
+    Ok(())
+}
+
 #[tauri::command]
 pub async fn apply_rename(
     old_path: String,
     new_name: String,
 ) -> Result<RenameResult, String> {
+    // SECURITY: Validate filename before any operations
+    validate_filename(&new_name)?;
+
     let old = std::path::Path::new(&old_path);
 
     if !old.exists() {
         return Err(format!("File does not exist: {}", old_path));
     }
 
+    // SECURITY: Reject symlinks to prevent symlink attacks
+    if old.is_symlink() {
+        return Err("Cannot rename symbolic links".to_string());
+    }
+
     let parent = old.parent().ok_or("Could not get parent directory")?;
     let new_path = parent.join(&new_name);
 
-    if new_path.exists() {
-        return Err(format!("File already exists: {:?}", new_path));
+    // SECURITY: Verify the new path stays within the same directory
+    let canonical_parent = parent.canonicalize()
+        .map_err(|e| format!("Parent path validation failed: {}", e))?;
+
+    // For the new file (which doesn't exist yet), verify the parent matches
+    let new_parent = new_path.parent().ok_or("Invalid new path")?;
+    if new_parent.canonicalize().ok() != Some(canonical_parent.clone()) {
+        return Err("Path traversal detected: new file must be in same directory".to_string());
     }
 
-    std::fs::rename(&old, &new_path)
-        .map_err(|e| format!("Failed to rename: {}", e))?;
-
-    Ok(RenameResult {
-        success: true,
-        old_path: old_path.clone(),
-        new_path: new_path.to_string_lossy().to_string(),
-    })
+    // Use atomic rename - handles EEXIST race condition
+    match std::fs::rename(&old, &new_path) {
+        Ok(()) => Ok(RenameResult {
+            success: true,
+            old_path,
+            new_path: new_path.to_string_lossy().to_string(),
+        }),
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+            Err(format!("File already exists: {}", new_path.display()))
+        }
+        Err(e) => Err(format!("Failed to rename: {}", e))
+    }
 }
 
 /// Undo a rename
@@ -173,14 +216,38 @@ pub async fn undo_rename(
         return Err(format!("File does not exist: {}", current_path));
     }
 
-    if original.exists() {
-        return Err(format!("Original path already exists: {}", original_path));
+    // SECURITY: Reject symlinks
+    if current.is_symlink() {
+        return Err("Cannot undo rename of symbolic links".to_string());
     }
 
-    std::fs::rename(&current, &original)
-        .map_err(|e| format!("Failed to undo rename: {}", e))?;
+    // SECURITY: Verify both paths are in the same directory
+    let current_parent = current.parent().ok_or("Invalid current path")?;
+    let original_parent = original.parent().ok_or("Invalid original path")?;
 
-    Ok(())
+    let canonical_current_parent = current_parent.canonicalize()
+        .map_err(|e| format!("Current path validation failed: {}", e))?;
+    let canonical_original_parent = original_parent.canonicalize()
+        .map_err(|e| format!("Original path validation failed: {}", e))?;
+
+    if canonical_current_parent != canonical_original_parent {
+        return Err("Security: undo can only restore to same directory".to_string());
+    }
+
+    // SECURITY: Validate the original filename
+    let original_name = original.file_name()
+        .ok_or("Invalid original filename")?
+        .to_string_lossy();
+    validate_filename(&original_name)?;
+
+    // Use atomic rename
+    match std::fs::rename(&current, &original) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+            Err(format!("Original path already exists: {}", original_path))
+        }
+        Err(e) => Err(format!("Failed to undo rename: {}", e))
+    }
 }
 
 /// Agentic organize command - explores folder and generates typed plan
@@ -204,7 +271,13 @@ pub async fn generate_organize_plan_agentic(
         );
     };
 
-    run_v2_agentic_organize(Path::new(&folder_path), &user_request, emit).await
+    // Create progress emitter for analysis-progress events (updates progress bar)
+    let app_handle_clone = app_handle.clone();
+    let progress_emit = move |progress: ProgressEvent| {
+        let _ = app_handle_clone.emit("analysis-progress", &progress);
+    };
+
+    run_v2_agentic_organize(Path::new(&folder_path), &user_request, emit, Some(progress_emit)).await
 }
 
 /// Suggest naming conventions for a folder
@@ -285,6 +358,12 @@ pub async fn generate_organize_plan_with_convention(
         );
     };
 
+    // Create progress emitter for analysis-progress events (updates progress bar)
+    let app_handle_clone = app_handle.clone();
+    let progress_emit = move |progress: ProgressEvent| {
+        let _ = app_handle_clone.emit("analysis-progress", &progress);
+    };
+
     // Build modified request with convention if provided
     let full_request = if let Some(ref conv) = convention {
         format!(
@@ -295,5 +374,5 @@ pub async fn generate_organize_plan_with_convention(
         user_request
     };
 
-    run_v2_agentic_organize(Path::new(&folder_path), &full_request, emit).await
+    run_v2_agentic_organize(Path::new(&folder_path), &full_request, emit, Some(progress_emit)).await
 }

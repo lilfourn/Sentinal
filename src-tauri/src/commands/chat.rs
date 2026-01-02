@@ -205,16 +205,25 @@ pub fn reset_chat_abort(abort_flag: State<ChatAbortFlag>) -> Result<(), String> 
     Ok(())
 }
 
+/// Directories to skip during recursive search
+const MENTION_EXCLUDED_DIRS: &[&str] = &[
+    "node_modules", ".git", ".cache", ".npm", ".cargo", "target", "build", "dist",
+    ".venv", "__pycache__", ".Trash", "Pods", ".gradle", ".m2", ".pnpm", ".yarn",
+    "vendor", ".next", ".nuxt", "Library", ".Spotlight-V100", ".fseventsd",
+];
+
 /// List files for @ mention autocomplete
 ///
-/// Returns files and folders in the given directory for mention suggestions
+/// Returns files and folders in the given directory for mention suggestions.
+/// Supports recursive search for finding files in subdirectories.
 #[tauri::command]
 pub async fn list_files_for_mention(
     directory: String,
     query: Option<String>,
     max_results: Option<usize>,
+    recursive: Option<bool>,
 ) -> Result<Vec<MentionFile>, String> {
-    eprintln!("[ChatCommand] list_files_for_mention: {}", directory);
+    eprintln!("[ChatCommand] list_files_for_mention: {} (recursive: {:?})", directory, recursive);
 
     let dir_path = PathBuf::from(&directory);
 
@@ -228,40 +237,77 @@ pub async fn list_files_for_mention(
 
     let max = max_results.unwrap_or(50);
     let query_lower = query.map(|q| q.to_lowercase());
+    let do_recursive = recursive.unwrap_or(true);
+    // Limit recursive depth - search deeper when user provides a query
+    let max_depth = if do_recursive && query_lower.is_some() { 5 } else { 1 };
 
-    let entries = fs::read_dir(&validated_path)
-        .map_err(|e| format!("Failed to read directory: {}", e))?;
+    eprintln!(
+        "[ChatCommand] Search params: max={}, recursive={}, max_depth={}, query={:?}",
+        max, do_recursive, max_depth, query_lower
+    );
 
     let mut results: Vec<MentionFile> = Vec::new();
 
-    for entry in entries.flatten() {
-        if results.len() >= max {
-            break;
+    // Recursive search helper
+    fn search_dir(
+        dir: &PathBuf,
+        query_lower: &Option<String>,
+        results: &mut Vec<MentionFile>,
+        max: usize,
+        current_depth: usize,
+        max_depth: usize,
+    ) {
+        if current_depth > max_depth || results.len() >= max {
+            return;
         }
 
-        let path = entry.path();
-        let name = entry.file_name().to_string_lossy().to_string();
+        let entries = match fs::read_dir(dir) {
+            Ok(e) => e,
+            Err(_) => return,
+        };
 
-        // Skip hidden files
-        if name.starts_with('.') {
-            continue;
-        }
+        for entry in entries.flatten() {
+            if results.len() >= max {
+                break;
+            }
 
-        // Filter by query if provided
-        if let Some(ref q) = query_lower {
-            if !name.to_lowercase().contains(q) {
+            let path = entry.path();
+            let name = entry.file_name().to_string_lossy().to_string();
+
+            // Skip hidden files/dirs
+            if name.starts_with('.') {
                 continue;
             }
+
+            let is_directory = path.is_dir();
+
+            // Skip excluded directories
+            if is_directory && MENTION_EXCLUDED_DIRS.contains(&name.as_str()) {
+                continue;
+            }
+
+            // Check if name matches query
+            let matches_query = match query_lower {
+                Some(ref q) if !q.is_empty() => name.to_lowercase().contains(q),
+                _ => true, // No query or empty query = show all
+            };
+
+            if matches_query {
+                results.push(MentionFile {
+                    path: path.display().to_string(),
+                    name: name.clone(),
+                    is_directory,
+                });
+            }
+
+            // Recurse into directories (only if we have a query to narrow results)
+            if is_directory && query_lower.as_ref().map(|q| !q.is_empty()).unwrap_or(false) {
+                search_dir(&path, query_lower, results, max, current_depth + 1, max_depth);
+            }
         }
-
-        let is_directory = path.is_dir();
-
-        results.push(MentionFile {
-            path: path.display().to_string(),
-            name,
-            is_directory,
-        });
     }
+
+    search_dir(&validated_path, &query_lower, &mut results, max, 1, max_depth);
 
     // Sort: directories first, then alphabetically
     results.sort_by(|a, b| {

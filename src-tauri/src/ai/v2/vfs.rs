@@ -78,6 +78,17 @@ pub struct OrganizationRule {
     pub priority: Option<i32>,
 }
 
+/// Result of applying organization rules
+#[derive(Debug, Clone)]
+pub struct ApplyRulesResult {
+    /// Number of operations created successfully
+    pub operations_created: usize,
+    /// Parsing errors that occurred (rule_name, error_message)
+    pub parsing_errors: Vec<(String, String)>,
+    /// Number of rules that were successfully applied
+    pub rules_applied: usize,
+}
+
 /// Shadow Virtual File System for planning operations
 pub struct ShadowVFS {
     /// Root path of the target folder (the folder being organized)
@@ -384,11 +395,15 @@ impl ShadowVFS {
     }
 
     /// Apply organization rules to generate operations
+    ///
+    /// Returns ApplyRulesResult with operations created and any parsing errors.
+    /// Parsing errors are collected (not fatal) so the AI can see what went wrong
+    /// and correct the rule syntax.
     pub fn apply_rules(
         &mut self,
         rules: &[OrganizationRule],
         mode: &str,
-    ) -> Result<usize, String> {
+    ) -> Result<ApplyRulesResult, String> {
         if mode == "replace" {
             self.operations.clear();
             self.destination_registry.clear();
@@ -401,15 +416,27 @@ impl ShadowVFS {
         // Track which files have been processed to avoid duplicates
         let mut processed_files: std::collections::HashSet<String> = std::collections::HashSet::new();
         let mut operations_created = 0;
+        let mut parsing_errors: Vec<(String, String)> = Vec::new();
+        let mut rules_applied = 0;
 
         // Collect folders that need to be created
         let mut folders_to_create: std::collections::HashSet<String> = std::collections::HashSet::new();
 
         for rule in &sorted_rules {
-            // Parse the rule condition
-            let expr = crate::ai::rules::RuleParser::parse(&rule.condition)
-                .map_err(|e| format!("Failed to parse rule '{}': {}", rule.name, e))?;
+            // Parse the rule condition - collect errors instead of failing
+            let expr = match crate::ai::rules::RuleParser::parse(&rule.condition) {
+                Ok(expr) => expr,
+                Err(e) => {
+                    // Collect the error and continue to next rule
+                    parsing_errors.push((
+                        rule.name.clone(),
+                        format!("Syntax error in '{}': {}", rule.condition, e),
+                    ));
+                    continue;
+                }
+            };
 
+            rules_applied += 1;
             let evaluator = RuleEvaluator::new(&self.vector_index);
 
             // Find matching files
@@ -559,7 +586,11 @@ impl ShadowVFS {
         combined_ops.append(&mut self.operations);
         self.operations = combined_ops;
 
-        Ok(operations_created)
+        Ok(ApplyRulesResult {
+            operations_created,
+            parsing_errors,
+            rules_applied,
+        })
     }
 
     /// Apply a rename pattern to a file
@@ -807,8 +838,9 @@ mod tests {
             priority: Some(1),
         }];
 
-        let count = vfs.apply_rules(&rules, "replace").unwrap();
-        assert!(count >= 2); // At least 2 PDFs
+        let result = vfs.apply_rules(&rules, "replace").unwrap();
+        assert!(result.operations_created >= 2); // At least 2 PDFs
+        assert!(result.parsing_errors.is_empty()); // No parsing errors
     }
 
     #[test]

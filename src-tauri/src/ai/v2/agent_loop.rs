@@ -209,6 +209,20 @@ impl serde::Serialize for ExpandableDetail {
     }
 }
 
+/// Progress event for analysis progress bar
+/// This is emitted via Tauri events to update the progress bar in the UI
+#[derive(Debug, Clone, Serialize)]
+pub struct ProgressEvent {
+    /// Current phase (scanning, analyzing, applying_rules, etc.)
+    pub phase: String,
+    /// Current progress value
+    pub current: usize,
+    /// Total expected value
+    pub total: usize,
+    /// Human-readable message
+    pub message: String,
+}
+
 /// Run the V4 agentic organize workflow
 ///
 /// V4 improvements (Map-Reduce Architecture):
@@ -222,18 +236,23 @@ impl serde::Serialize for ExpandableDetail {
 /// - Dynamic rate limiting based on API response headers
 /// - Expandable details for UI transparency
 ///
+/// V7 features:
+/// - **Progress emitter**: Optional callback to emit analysis-progress events for UI progress bar
+///
 /// This function:
 /// 1. Builds a ShadowVFS from the target folder
 /// 2. Checks file count to decide between full tree or sampling mode
 /// 3. Runs the coverage loop with Claude using V2 tools
 /// 4. Returns the final OrganizePlan
-pub async fn run_v2_agentic_organize<F>(
+pub async fn run_v2_agentic_organize<F, P>(
     target_folder: &Path,
     user_request: &str,
     event_emitter: F,
+    progress_emitter: Option<P>,
 ) -> Result<OrganizePlan, String>
 where
     F: Fn(&str, &str, Option<Vec<ExpandableDetail>>),
+    P: Fn(ProgressEvent),
 {
     // 1. Build ShadowVFS from target folder
     event_emitter("indexing", "Scanning folder structure...", Some(vec![
@@ -247,6 +266,16 @@ where
 
     let file_count = vfs.file_count();
     let dir_count = vfs.directory_count();
+
+    // Emit initial progress
+    if let Some(ref emit_progress) = progress_emitter {
+        emit_progress(ProgressEvent {
+            phase: "scanning".to_string(),
+            current: 0,
+            total: file_count,
+            message: format!("Found {} files in {} directories", file_count, dir_count),
+        });
+    }
 
     // V5: Check if hologram compression should be used (pattern-heavy folders)
     // V4: Fall back to sampling for large folders without patterns
@@ -375,6 +404,17 @@ where
         }
 
         eprintln!("[V4AgentLoop] Iteration {}", iteration + 1);
+
+        // Emit progress for each iteration
+        if let Some(ref emit_progress) = progress_emitter {
+            let organized = vfs.organized_count();
+            emit_progress(ProgressEvent {
+                phase: "analyzing".to_string(),
+                current: organized,
+                total: file_count,
+                message: format!("Iteration {}/{} - {} of {} files organized", iteration + 1, MAX_ITERATIONS, organized, file_count),
+            });
+        }
 
         // After first iteration, replace full tree context with compact summary
         // This saves ~15,000 tokens per request (from 60KB tree to 500 byte summary)
@@ -593,6 +633,15 @@ where
                                     ExpandableDetail { label: "Renames".to_string(), value: rename_count.to_string() },
                                 ]),
                             );
+                            // Emit final progress
+                            if let Some(ref emit_progress) = progress_emitter {
+                                emit_progress(ProgressEvent {
+                                    phase: "complete".to_string(),
+                                    current: file_count,
+                                    total: file_count,
+                                    message: format!("Plan complete: {} operations", plan.operations.len()),
+                                });
+                            }
                             return Ok(plan);
                         }
                         V2ToolResult::Error(err) => {

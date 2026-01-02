@@ -49,6 +49,7 @@ impl Default for GrokState {
 
 /// Initialize the Grok organizer with an API key
 /// If api_key is empty, will try to get from environment or credential manager
+/// Validates the API key format before initializing
 #[tauri::command]
 pub async fn grok_init(
     api_key: Option<String>,
@@ -57,8 +58,12 @@ pub async fn grok_init(
 ) -> Result<(), String> {
     // Get API key from parameter or fallback sources
     let key = match api_key {
-        Some(k) if !k.is_empty() => k,
-        _ => get_grok_api_key()?,
+        Some(k) if !k.is_empty() => {
+            // Validate key passed directly
+            validate_api_key(&k)?;
+            k
+        }
+        _ => get_grok_api_key()?, // Already validates internally
     };
 
     // Get cache directory
@@ -123,6 +128,7 @@ pub async fn grok_organize(
 /// Abort any running Grok plan generation
 /// Sets the abort flag which is checked during the organize pipeline
 #[tauri::command]
+#[allow(dead_code)]
 pub fn grok_abort_plan(abort_flag: State<GrokAbortFlag>) -> Result<(), String> {
     tracing::info!("[Grok] Aborting plan generation");
     abort_flag.0.store(true, Ordering::SeqCst);
@@ -131,6 +137,7 @@ pub fn grok_abort_plan(abort_flag: State<GrokAbortFlag>) -> Result<(), String> {
 
 /// Reset the Grok abort flag (called before starting a new plan)
 #[tauri::command]
+#[allow(dead_code)]
 pub fn grok_reset_abort(abort_flag: State<GrokAbortFlag>) -> Result<(), String> {
     abort_flag.0.store(false, Ordering::SeqCst);
     Ok(())
@@ -418,29 +425,92 @@ pub async fn grok_check_api_key() -> Result<bool, String> {
     }
 }
 
+/// Validate that an API key is not a placeholder or invalid value
+/// Returns Ok(()) if valid, Err with description if invalid
+fn validate_api_key(key: &str) -> Result<(), String> {
+    let key_lower = key.to_lowercase();
+
+    // Check for common placeholder patterns
+    let placeholder_patterns = [
+        "your-api-key",
+        "your_api_key",
+        "your api key",
+        "yourapikey",
+        "api-key-here",
+        "api_key_here",
+        "enter-your",
+        "enter_your",
+        "replace-with",
+        "replace_with",
+        "xxx",
+        "placeholder",
+        "example",
+        "test-key",
+        "test_key",
+        "demo",
+        "sk-xxx",
+        "xai-xxx",
+    ];
+
+    for pattern in placeholder_patterns {
+        if key_lower.contains(pattern) {
+            return Err(format!(
+                "API key appears to be a placeholder (contains '{}'). Please enter a valid xAI API key from https://console.x.ai",
+                pattern
+            ));
+        }
+    }
+
+    // xAI keys typically start with "xai-" and are fairly long
+    if key.len() < 20 {
+        return Err("API key is too short. Valid xAI API keys are typically longer. Get yours from https://console.x.ai".to_string());
+    }
+
+    // Check for obviously invalid characters (spaces at start/end, newlines)
+    if key.trim() != key {
+        return Err("API key contains leading/trailing whitespace. Please remove any extra spaces.".to_string());
+    }
+
+    if key.contains('\n') || key.contains('\r') {
+        return Err("API key contains newline characters. Please enter only the key itself.".to_string());
+    }
+
+    Ok(())
+}
+
 /// Get the Grok API key from any available source
 fn get_grok_api_key() -> Result<String, String> {
     // Priority: env vars > credential manager
     if let Ok(key) = std::env::var("XAI_API_KEY") {
+        validate_api_key(&key)?;
         return Ok(key);
     }
     if let Ok(key) = std::env::var("GROK_API_KEY") {
+        validate_api_key(&key)?;
         return Ok(key);
     }
     if let Ok(key) = std::env::var("VITE_XAI_API_KEY") {
+        validate_api_key(&key)?;
         return Ok(key);
     }
 
     // Try credential manager
     use crate::ai::credentials::CredentialManager;
-    CredentialManager::get_api_key("xai")
-        .map_err(|_| "No Grok API key found. Set XAI_API_KEY in .env or configure in settings.".to_string())
+    let key = CredentialManager::get_api_key("xai")
+        .map_err(|_| "No Grok API key found. Set XAI_API_KEY in .env or configure in settings.".to_string())?;
+
+    validate_api_key(&key)?;
+    Ok(key)
 }
 
 /// Store Grok API key (uses the existing credential manager)
+/// Validates the key format before storing
 #[tauri::command]
 pub async fn grok_set_api_key(api_key: String) -> Result<(), String> {
     use crate::ai::credentials::CredentialManager;
+
+    // Validate the key before storing
+    validate_api_key(&api_key)?;
 
     CredentialManager::store_api_key("xai", &api_key)?;
     tracing::info!("[Grok] API key stored");

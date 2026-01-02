@@ -1,6 +1,6 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, Component, ReactNode } from 'react';
 import { invoke } from '@tauri-apps/api/core';
-import { X, Check, FolderOpen, CreditCard, Sparkles } from 'lucide-react';
+import { X, Check, CreditCard, Sparkles, ChevronDown, ChevronUp, AlertTriangle } from 'lucide-react';
 import { cn } from '../../lib/utils';
 import { useWatcher } from '../../hooks/useAutoRename';
 import { useSyncedSettings } from '../../hooks/useSyncedSettings';
@@ -9,6 +9,11 @@ import {
   PRO_PRICE,
 } from '../../stores/subscription-store';
 import { UsageDashboard, PlanBadge } from '../subscription';
+import {
+  RenameHistoryPanel,
+  WatchedFoldersManager,
+  CustomRulesEditor,
+} from '../downloads-watcher';
 
 interface SettingsPanelProps {
   isOpen: boolean;
@@ -23,7 +28,6 @@ interface ProviderStatus {
 export function SettingsPanel({ isOpen, onClose }: SettingsPanelProps) {
   const [providers, setProviders] = useState<ProviderStatus[]>([]);
   const [watcherEnabled, setWatcherEnabled] = useState(false);
-  const [watchingPath, setWatchingPath] = useState<string | null>(null);
   const [loadingWatcher, setLoadingWatcher] = useState(false);
 
   const { startWatcher, stopWatcher, getStatus } = useWatcher();
@@ -39,7 +43,6 @@ export function SettingsPanel({ isOpen, onClose }: SettingsPanelProps) {
     // Load watcher status
     getStatus().then((status) => {
       setWatcherEnabled(status.enabled);
-      setWatchingPath(status.watchingPath);
     });
   }, [isOpen, getStatus]);
 
@@ -55,7 +58,6 @@ export function SettingsPanel({ isOpen, onClose }: SettingsPanelProps) {
       if (watcherEnabled) {
         await stopWatcher();
         setWatcherEnabled(false);
-        setWatchingPath(null);
         // Save the setting to local store and Convex
         await updateSettings({ watchDownloads: false });
       } else {
@@ -63,7 +65,6 @@ export function SettingsPanel({ isOpen, onClose }: SettingsPanelProps) {
         if (success) {
           const status = await getStatus();
           setWatcherEnabled(status.enabled);
-          setWatchingPath(status.watchingPath);
           // Save the setting to local store and Convex
           await updateSettings({ watchDownloads: true });
         }
@@ -95,58 +96,12 @@ export function SettingsPanel({ isOpen, onClose }: SettingsPanelProps) {
         {/* Content */}
         <div className="p-4 space-y-6">
           {/* Auto-Rename Section */}
-          <section>
-            <h3 className="text-sm font-medium text-gray-700 dark:text-gray-300 mb-3">
-              Auto-Rename Sentinel
-            </h3>
-
-            <div className="space-y-3">
-              {/* Toggle */}
-              <div className="flex items-center justify-between">
-                <div>
-                  <p className="text-sm text-gray-900 dark:text-gray-100">
-                    Watch Downloads folder
-                  </p>
-                  <p className="text-xs text-gray-500 dark:text-gray-400">
-                    Automatically rename new files using AI
-                  </p>
-                </div>
-                <button
-                  onClick={handleToggleWatcher}
-                  disabled={!anthropicConfigured || loadingWatcher}
-                  className={cn(
-                    'relative w-11 h-6 rounded-full transition-colors',
-                    watcherEnabled
-                      ? 'bg-orange-500'
-                      : 'bg-gray-300 dark:bg-gray-600',
-                    (!anthropicConfigured || loadingWatcher) && 'opacity-50 cursor-not-allowed'
-                  )}
-                >
-                  <span
-                    className={cn(
-                      'absolute top-0.5 left-0.5 w-5 h-5 rounded-full bg-white shadow transition-transform',
-                      watcherEnabled && 'translate-x-5'
-                    )}
-                  />
-                </button>
-              </div>
-
-              {/* Watching path */}
-              {watchingPath && (
-                <div className="flex items-center gap-2 text-xs text-gray-500 dark:text-gray-400">
-                  <FolderOpen size={14} />
-                  <span className="truncate">{watchingPath}</span>
-                </div>
-              )}
-
-              {/* Warning if no API key */}
-              {!anthropicConfigured && (
-                <p className="text-xs text-amber-600 dark:text-amber-400">
-                  Configure your Anthropic API key to enable auto-rename
-                </p>
-              )}
-            </div>
-          </section>
+          <AutoRenameSentinelSection
+            anthropicConfigured={anthropicConfigured}
+            watcherEnabled={watcherEnabled}
+            loadingWatcher={loadingWatcher}
+            onToggleWatcher={handleToggleWatcher}
+          />
 
           {/* File Operations Section */}
           <section>
@@ -200,6 +155,169 @@ export function SettingsPanel({ isOpen, onClose }: SettingsPanelProps) {
         </div>
       </div>
     </div>
+  );
+}
+
+/**
+ * Error boundary to catch rendering errors in settings sections
+ * Prevents the entire settings panel from crashing if a section fails
+ */
+interface SettingsErrorBoundaryState {
+  hasError: boolean;
+  error?: Error;
+}
+
+interface SettingsErrorBoundaryProps {
+  children: ReactNode;
+  sectionName: string;
+}
+
+class SettingsErrorBoundary extends Component<
+  SettingsErrorBoundaryProps,
+  SettingsErrorBoundaryState
+> {
+  constructor(props: SettingsErrorBoundaryProps) {
+    super(props);
+    this.state = { hasError: false };
+  }
+
+  static getDerivedStateFromError(error: Error): SettingsErrorBoundaryState {
+    return { hasError: true, error };
+  }
+
+  componentDidCatch(error: Error, errorInfo: React.ErrorInfo) {
+    console.error(`[Settings] ${this.props.sectionName} error:`, error, errorInfo);
+  }
+
+  render() {
+    if (this.state.hasError) {
+      return (
+        <div className="p-3 bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 rounded-lg">
+          <div className="flex items-center gap-2 text-red-700 dark:text-red-400">
+            <AlertTriangle size={14} />
+            <span className="text-xs font-medium">
+              {this.props.sectionName} failed to load
+            </span>
+          </div>
+          <p className="text-xs text-red-600 dark:text-red-400 mt-1">
+            Try reloading the app. Error: {this.state.error?.message || 'Unknown error'}
+          </p>
+        </div>
+      );
+    }
+
+    return this.props.children;
+  }
+}
+
+/**
+ * Auto-Rename Sentinel section with expanded features
+ */
+interface AutoRenameSentinelSectionProps {
+  anthropicConfigured: boolean | undefined;
+  watcherEnabled: boolean;
+  loadingWatcher: boolean;
+  onToggleWatcher: () => void;
+}
+
+function AutoRenameSentinelSection({
+  anthropicConfigured,
+  watcherEnabled,
+  loadingWatcher,
+  onToggleWatcher,
+}: AutoRenameSentinelSectionProps) {
+  const [expanded, setExpanded] = useState(false);
+
+  return (
+    <section className="space-y-3">
+      {/* Header with toggle */}
+      <div className="flex items-center justify-between">
+        <div className="flex items-center gap-2">
+          <h3 className="text-sm font-medium text-gray-700 dark:text-gray-300">
+            Auto-Rename Sentinel
+          </h3>
+          {watcherEnabled && (
+            <span className="px-1.5 py-0.5 text-xs rounded-full bg-green-100 dark:bg-green-900/30 text-green-600 dark:text-green-400">
+              Active
+            </span>
+          )}
+        </div>
+        <button
+          onClick={onToggleWatcher}
+          disabled={!anthropicConfigured || loadingWatcher}
+          className={cn(
+            'relative w-11 h-6 rounded-full transition-colors',
+            watcherEnabled
+              ? 'bg-orange-500'
+              : 'bg-gray-300 dark:bg-gray-600',
+            (!anthropicConfigured || loadingWatcher) && 'opacity-50 cursor-not-allowed'
+          )}
+        >
+          <span
+            className={cn(
+              'absolute top-0.5 left-0.5 w-5 h-5 rounded-full bg-white shadow transition-transform',
+              watcherEnabled && 'translate-x-5'
+            )}
+          />
+        </button>
+      </div>
+
+      {/* Description */}
+      <p className="text-xs text-gray-500 dark:text-gray-400">
+        Automatically rename new files using AI when they appear in watched folders
+      </p>
+
+      {/* Warning if no API key */}
+      {!anthropicConfigured && (
+        <p className="text-xs text-amber-600 dark:text-amber-400 p-2 bg-amber-50 dark:bg-amber-900/20 rounded">
+          Configure your Anthropic API key in the API section to enable auto-rename
+        </p>
+      )}
+
+      {/* Expand/collapse for advanced options */}
+      <button
+        onClick={() => setExpanded(!expanded)}
+        className="flex items-center gap-1 text-xs text-gray-500 hover:text-gray-700 dark:hover:text-gray-300"
+      >
+        {expanded ? <ChevronUp size={12} /> : <ChevronDown size={12} />}
+        {expanded ? 'Hide options' : 'Show folders, rules & history'}
+      </button>
+
+      {/* Expanded sections */}
+      {expanded && (
+        <div className="space-y-4 pt-2 border-t border-gray-100 dark:border-gray-700">
+          {/* Watched Folders */}
+          <div className="space-y-2">
+            <h4 className="text-xs font-medium text-gray-600 dark:text-gray-400 uppercase tracking-wider">
+              Watched Folders
+            </h4>
+            <SettingsErrorBoundary sectionName="Watched Folders">
+              <WatchedFoldersManager />
+            </SettingsErrorBoundary>
+          </div>
+
+          {/* Custom Rules */}
+          <div className="space-y-2">
+            <h4 className="text-xs font-medium text-gray-600 dark:text-gray-400 uppercase tracking-wider">
+              Rename Rules
+            </h4>
+            <SettingsErrorBoundary sectionName="Rename Rules">
+              <CustomRulesEditor compact />
+            </SettingsErrorBoundary>
+          </div>
+
+          {/* Rename History */}
+          <div className="space-y-2">
+            <h4 className="text-xs font-medium text-gray-600 dark:text-gray-400 uppercase tracking-wider">
+              Recent Renames
+            </h4>
+            <SettingsErrorBoundary sectionName="Rename History">
+              <RenameHistoryPanel maxItems={10} compact />
+            </SettingsErrorBoundary>
+          </div>
+        </div>
+      )}
+    </section>
   );
 }
 

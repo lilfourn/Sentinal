@@ -33,7 +33,7 @@ mod vfs;
 pub mod agent_loop;
 
 // Public exports
-pub use agent_loop::{run_v2_agentic_organize, ExpandableDetail};
+pub use agent_loop::{run_v2_agentic_organize, ExpandableDetail, ProgressEvent};
 #[allow(unused_imports)]
 pub use analytics::{ContentPreview, DigestGenerator, FolderDigest, SemanticTag};
 #[allow(unused_imports)]

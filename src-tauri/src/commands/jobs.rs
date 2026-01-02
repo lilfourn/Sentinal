@@ -352,10 +352,15 @@ pub async fn execute_plan_parallel(
         tracing::debug!(completed = completed, total = total, "Execution progress");
     }));
 
-    // Execute using the parallel DAG executor with progress callback and conflict config
+    // Execute using the parallel DAG executor with progress callback, conflict config, and events
     let engine = ExecutionEngine::new();
     let result = engine
-        .execute_journal_with_config(&plan.plan_id, Some(progress_callback), config)
+        .execute_journal_with_config_and_events(
+            &plan.plan_id,
+            Some(progress_callback),
+            config,
+            Some(app_handle.clone()),
+        )
         .await?;
 
     tracing::info!(

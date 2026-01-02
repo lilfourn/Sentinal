@@ -9,6 +9,7 @@
 //! - grep: Search file contents with regex
 
 use super::tools_terminal::{execute_bash, execute_grep, execute_shell, get_terminal_tools};
+use crate::ai::grok::document_parser::{is_parseable, parse_document};
 use crate::security::{safe_regex, PathValidator};
 use regex::Regex;
 use serde_json::{json, Value};
@@ -574,6 +575,37 @@ async fn execute_search_hybrid(input: &Value) -> ChatToolResult {
     }
 }
 
+/// Known binary file extensions that cannot be read as text
+const BINARY_EXTENSIONS: &[&str] = &[
+    // Images
+    "png", "jpg", "jpeg", "gif", "bmp", "ico", "webp", "svg", "tiff", "tif", "heic", "heif",
+    // Audio
+    "mp3", "wav", "flac", "aac", "ogg", "m4a", "wma",
+    // Video
+    "mp4", "avi", "mkv", "mov", "wmv", "flv", "webm",
+    // Archives
+    "zip", "tar", "gz", "rar", "7z", "bz2", "xz",
+    // Executables
+    "exe", "dll", "so", "dylib", "app", "dmg", "pkg", "deb", "rpm",
+    // Other binary
+    "bin", "dat", "db", "sqlite", "sqlite3",
+];
+
+/// Check if a file extension indicates a binary file
+fn is_binary_extension(ext: Option<&str>) -> bool {
+    ext.map(|e| BINARY_EXTENSIONS.contains(&e.to_lowercase().as_str()))
+        .unwrap_or(false)
+}
+
+/// Check if a file extension indicates an image
+fn is_image_extension(ext: Option<&str>) -> bool {
+    const IMAGE_EXTENSIONS: &[&str] = &[
+        "png", "jpg", "jpeg", "gif", "bmp", "ico", "webp", "svg", "tiff", "tif", "heic", "heif",
+    ];
+    ext.map(|e| IMAGE_EXTENSIONS.contains(&e.to_lowercase().as_str()))
+        .unwrap_or(false)
+}
+
 fn execute_read_file(input: &Value) -> ChatToolResult {
     let path = match input.get("path").and_then(|p| p.as_str()) {
         Some(p) => p,
@@ -596,6 +628,69 @@ fn execute_read_file(input: &Value) -> ChatToolResult {
         return ChatToolResult::Error("Path is a directory, not a file".to_string());
     }
 
+    let extension = validated_path
+        .extension()
+        .and_then(|e| e.to_str());
+
+    // Handle images - can't extract text
+    if is_image_extension(extension) {
+        return ChatToolResult::Success(format!(
+            "[Image file: {}]\nThis is an image file. I cannot read its text content, but I can see it was attached to the conversation.",
+            validated_path.file_name().unwrap_or_default().to_string_lossy()
+        ));
+    }
+
+    // Handle parseable documents (PDF, DOCX, etc.) - use document parser
+    if is_parseable(extension) {
+        eprintln!("[ChatTool] Using document parser for: {}", path);
+        match parse_document(&validated_path) {
+            Ok(parsed) => {
+                let text = &parsed.text;
+                let lines: Vec<&str> = text.lines().take(max_lines).collect();
+                let truncated = lines.len() < text.lines().count();
+
+                // Get filename from path
+                let filename = validated_path
+                    .file_name()
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_else(|| "document".to_string());
+
+                let header = format!(
+                    "[Document: {} | {} pages | {} words]\n\n",
+                    filename,
+                    parsed.metadata.page_count.unwrap_or(1),
+                    parsed.metadata.word_count.unwrap_or(0)
+                );
+
+                let result = if truncated {
+                    format!(
+                        "{}{}\n\n[Truncated at {} lines]",
+                        header,
+                        lines.join("\n"),
+                        max_lines
+                    )
+                } else {
+                    format!("{}{}", header, lines.join("\n"))
+                };
+
+                return ChatToolResult::Success(result);
+            }
+            Err(e) => {
+                return ChatToolResult::Error(format!("Failed to parse document: {}", e));
+            }
+        }
+    }
+
+    // Handle other known binary files
+    if is_binary_extension(extension) {
+        return ChatToolResult::Error(format!(
+            "Cannot read binary file: {}. This file type ({}) is not readable as text.",
+            validated_path.file_name().unwrap_or_default().to_string_lossy(),
+            extension.unwrap_or("unknown")
+        ));
+    }
+
+    // Try to read as UTF-8 text
     match fs::read_to_string(&validated_path) {
         Ok(content) => {
             let lines: Vec<&str> = content.lines().take(max_lines).collect();
@@ -613,7 +708,18 @@ fn execute_read_file(input: &Value) -> ChatToolResult {
 
             ChatToolResult::Success(result)
         }
-        Err(e) => ChatToolResult::Error(format!("Failed to read file: {}", e)),
+        Err(e) => {
+            // Check if it's a UTF-8 error - file might be binary
+            let err_str = e.to_string();
+            if err_str.contains("UTF-8") || err_str.contains("utf-8") || err_str.contains("valid") {
+                ChatToolResult::Error(format!(
+                    "Cannot read file as text: {} appears to be a binary file or uses non-UTF-8 encoding.",
+                    validated_path.file_name().unwrap_or_default().to_string_lossy()
+                ))
+            } else {
+                ChatToolResult::Error(format!("Failed to read file: {}", e))
+            }
+        }
     }
 }
 

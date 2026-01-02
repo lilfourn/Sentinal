@@ -87,6 +87,8 @@ pub fn run() {
             start_downloads_watcher,
             stop_downloads_watcher,
             get_watcher_status,
+            add_watched_folder,
+            remove_watched_folder,
             // AI commands
             set_api_key,
             delete_api_key,

@@ -11,8 +11,9 @@ function getEnv(key: string): string | undefined {
 }
 
 // CORS headers for cross-origin requests from Tauri app
+// Restrict to Tauri app origin for security (prevents arbitrary web access)
 const corsHeaders = {
-  "Access-Control-Allow-Origin": "*",
+  "Access-Control-Allow-Origin": "tauri://localhost",
   "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
   "Access-Control-Allow-Headers": "Content-Type, Authorization",
 };
@@ -322,6 +323,16 @@ http.route({
         return withCors(new Response("Missing customerId", { status: 400 }));
       }
 
+      // SECURITY: Verify the customerId belongs to the authenticated user
+      const subscription = await ctx.runQuery(internal.subscriptions.getByTokenIdentifier, {
+        tokenIdentifier: identity.tokenIdentifier,
+      });
+
+      if (!subscription || subscription.stripeCustomerId !== customerId) {
+        console.error(`Customer ID mismatch: requested ${customerId}, user has ${subscription?.stripeCustomerId}`);
+        return withCors(new Response("Unauthorized: customer ID does not belong to user", { status: 403 }));
+      }
+
       // Create Stripe portal session
       const response = await fetch("https://api.stripe.com/v1/billing_portal/sessions", {
         method: "POST",
@@ -428,6 +439,21 @@ function mapStripeStatus(
 }
 
 /**
+ * Constant-time string comparison to prevent timing attacks
+ * Returns true if strings are equal, false otherwise
+ */
+function timingSafeEqual(a: string, b: string): boolean {
+  if (a.length !== b.length) {
+    return false;
+  }
+  let result = 0;
+  for (let i = 0; i < a.length; i++) {
+    result |= a.charCodeAt(i) ^ b.charCodeAt(i);
+  }
+  return result === 0;
+}
+
+/**
  * Verify Stripe webhook signature
  * Implements HMAC-SHA256 verification per Stripe's spec
  */
@@ -478,8 +504,8 @@ async function verifyStripeSignature(
     .map((b) => b.toString(16).padStart(2, "0"))
     .join("");
 
-  // Constant-time comparison (basic implementation)
-  if (computedSignature !== expectedSignature) {
+  // Constant-time comparison to prevent timing attacks
+  if (!timingSafeEqual(computedSignature, expectedSignature)) {
     throw new Error("Signature mismatch");
   }
 

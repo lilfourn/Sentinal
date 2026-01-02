@@ -218,13 +218,31 @@ fn execute_apply_rules(input: &serde_json::Value, vfs: &mut ShadowVFS) -> V2Tool
     eprintln!("[V2Tool] apply_organization_rules: {} rules, mode={}", rules.len(), mode);
 
     match vfs.apply_rules(&rules, mode) {
-        Ok(count) => {
-            let output = format!(
-                "Applied {} rules, generated {} operations.\nTotal operations in plan: {}",
+        Ok(result) => {
+            let mut output = format!(
+                "Applied {} of {} rules, generated {} operations.\nTotal operations in plan: {}",
+                result.rules_applied,
                 rules.len(),
-                count,
+                result.operations_created,
                 vfs.operations().len()
             );
+
+            // If there were parsing errors, report them so the AI can self-correct
+            if !result.parsing_errors.is_empty() {
+                output.push_str("\n\n## PARSING ERRORS - Please fix these rules:\n");
+                output.push_str("The following rules had invalid syntax and were skipped:\n\n");
+                for (rule_name, error) in &result.parsing_errors {
+                    output.push_str(&format!("- **{}**: {}\n", rule_name, error));
+                }
+                output.push_str("\n### How to fix:\n");
+                output.push_str("- Fields must come after 'file.' (e.g., `file.ext`, `file.name`)\n");
+                output.push_str("- Valid fields: `name`, `ext`, `size`, `path`, `modifiedAt`, `createdAt`, `mimeType`, `isHidden`\n");
+                output.push_str("- Use `==` not `=` for comparison\n");
+                output.push_str("- String values must be quoted: `file.ext == 'pdf'`\n");
+                output.push_str("- Functions only work on `file.name`: `file.name.contains('text')`\n");
+                output.push_str("\nPlease retry with corrected rule syntax.");
+            }
+
             V2ToolResult::Continue(output)
         }
         Err(e) => V2ToolResult::Error(format!("Failed to apply rules: {}", e)),

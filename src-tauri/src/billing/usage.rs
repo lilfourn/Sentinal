@@ -189,6 +189,7 @@ impl UsageTracker {
     }
 
     /// Clear old usage records (older than 90 days)
+    #[allow(dead_code)]
     pub fn cleanup_old_records(&self) -> Result<usize, String> {
         let conn = self.conn.lock().unwrap();
         let cutoff = Utc::now() - chrono::Duration::days(90);

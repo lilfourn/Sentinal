@@ -1,5 +1,6 @@
 use notify::{EventKind, RecommendedWatcher, RecursiveMode};
 use notify_debouncer_full::{new_debouncer, DebouncedEvent, Debouncer, RecommendedCache};
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -16,11 +17,20 @@ pub struct FileChangeEvent {
     pub extension: Option<String>,
     pub size: u64,
     pub content_preview: Option<String>,
+    pub watched_folder: String,
 }
 
-/// Watcher state
+/// Individual folder watcher
+struct FolderWatcher {
+    debouncer: Debouncer<RecommendedWatcher, RecommendedCache>,
+    path: PathBuf,
+}
+
+/// Watcher state - supports multiple folders
 pub struct WatcherState {
-    pub watcher: Option<Debouncer<RecommendedWatcher, RecommendedCache>>,
+    /// Map of folder path -> watcher
+    pub watchers: HashMap<String, FolderWatcher>,
+    /// Legacy single watcher path (for backwards compatibility)
     pub watching_path: Option<PathBuf>,
     pub enabled: bool,
 }
@@ -28,7 +38,7 @@ pub struct WatcherState {
 impl Default for WatcherState {
     fn default() -> Self {
         Self {
-            watcher: None,
+            watchers: HashMap::new(),
             watching_path: None,
             enabled: false,
         }
@@ -43,19 +53,22 @@ pub fn create_watcher_handle() -> WatcherHandle {
     Arc::new(Mutex::new(WatcherState::default()))
 }
 
-/// Start watching a directory
+/// Start watching a directory (legacy single-folder mode)
 pub fn start_watcher(
     app: AppHandle,
     handle: WatcherHandle,
     path: PathBuf,
 ) -> Result<(), String> {
-    let mut state = handle.lock().map_err(|e| e.to_string())?;
+    let mut state = handle.lock().unwrap_or_else(|poisoned| {
+        eprintln!("Watcher state mutex was poisoned, recovering...");
+        poisoned.into_inner()
+    });
 
-    // Stop existing watcher if any
-    if state.watcher.is_some() {
-        state.watcher = None;
-    }
+    // Clear all existing watchers
+    state.watchers.clear();
 
+    let path_str = path.to_string_lossy().to_string();
+    let watched_folder = path_str.clone();
     let app_clone = app.clone();
 
     // Create debounced watcher (waits 500ms for file writes to complete)
@@ -66,7 +79,7 @@ pub fn start_watcher(
             match result {
                 Ok(events) => {
                     for event in events {
-                        handle_file_event(&app_clone, &event);
+                        handle_file_event(&app_clone, &event, &watched_folder);
                     }
                 }
                 Err(errors) => {
@@ -84,17 +97,99 @@ pub fn start_watcher(
         .watch(&path, RecursiveMode::NonRecursive)
         .map_err(|e| format!("Failed to watch path: {}", e))?;
 
-    state.watcher = Some(debouncer);
+    state.watchers.insert(path_str, FolderWatcher {
+        debouncer,
+        path: path.clone(),
+    });
     state.watching_path = Some(path);
     state.enabled = true;
 
     Ok(())
 }
 
-/// Stop watching
+/// Add a folder to watch (multi-folder mode)
+pub fn add_watched_folder(
+    app: AppHandle,
+    handle: WatcherHandle,
+    path: PathBuf,
+) -> Result<(), String> {
+    let mut state = handle.lock().unwrap_or_else(|poisoned| {
+        eprintln!("Watcher state mutex was poisoned, recovering...");
+        poisoned.into_inner()
+    });
+
+    let path_str = path.to_string_lossy().to_string();
+
+    // Skip if already watching
+    if state.watchers.contains_key(&path_str) {
+        return Ok(());
+    }
+
+    let watched_folder = path_str.clone();
+    let app_clone = app.clone();
+
+    // Create debounced watcher
+    let mut debouncer = new_debouncer(
+        Duration::from_millis(500),
+        None,
+        move |result: Result<Vec<DebouncedEvent>, Vec<notify::Error>>| {
+            match result {
+                Ok(events) => {
+                    for event in events {
+                        handle_file_event(&app_clone, &event, &watched_folder);
+                    }
+                }
+                Err(errors) => {
+                    for error in errors {
+                        eprintln!("Watcher error: {:?}", error);
+                    }
+                }
+            }
+        },
+    )
+    .map_err(|e| format!("Failed to create watcher: {}", e))?;
+
+    debouncer
+        .watch(&path, RecursiveMode::NonRecursive)
+        .map_err(|e| format!("Failed to watch path: {}", e))?;
+
+    state.watchers.insert(path_str, FolderWatcher {
+        debouncer,
+        path,
+    });
+    state.enabled = true;
+
+    Ok(())
+}
+
+/// Remove a folder from watching
+pub fn remove_watched_folder(
+    handle: WatcherHandle,
+    path: &str,
+) -> Result<(), String> {
+    let mut state = handle.lock().unwrap_or_else(|poisoned| {
+        eprintln!("Watcher state mutex was poisoned, recovering...");
+        poisoned.into_inner()
+    });
+
+    state.watchers.remove(path);
+
+    // Update enabled state
+    if state.watchers.is_empty() {
+        state.enabled = false;
+        state.watching_path = None;
+    }
+
+    Ok(())
+}
+
+/// Stop watching all folders
 pub fn stop_watcher(handle: WatcherHandle) -> Result<(), String> {
-    let mut state = handle.lock().map_err(|e| e.to_string())?;
-    state.watcher = None;
+    let mut state = handle.lock().unwrap_or_else(|poisoned| {
+        eprintln!("Watcher state mutex was poisoned, recovering...");
+        poisoned.into_inner()
+    });
+    state.watchers.clear();
     state.watching_path = None;
     state.enabled = false;
     Ok(())
@@ -102,22 +197,40 @@ pub fn stop_watcher(handle: WatcherHandle) -> Result<(), String> {
 
 /// Check if watcher is running
 pub fn is_watcher_running(handle: &WatcherHandle) -> bool {
-    handle
-        .lock()
-        .map(|state| state.enabled && state.watcher.is_some())
-        .unwrap_or(false)
+    match handle.lock() {
+        Ok(state) => state.enabled && !state.watchers.is_empty(),
+        Err(poisoned) => {
+            eprintln!("Watcher state mutex was poisoned in is_watcher_running");
+            let state = poisoned.into_inner();
+            state.enabled && !state.watchers.is_empty()
+        }
+    }
 }
 
-/// Get the path being watched
+/// Get the path being watched (legacy - returns first path)
 pub fn get_watching_path(handle: &WatcherHandle) -> Option<PathBuf> {
-    handle
-        .lock()
-        .ok()
-        .and_then(|state| state.watching_path.clone())
+    match handle.lock() {
+        Ok(state) => state.watching_path.clone(),
+        Err(poisoned) => {
+            eprintln!("Watcher state mutex was poisoned in get_watching_path");
+            poisoned.into_inner().watching_path.clone()
+        }
+    }
+}
+
+/// Get all paths being watched
+pub fn get_all_watching_paths(handle: &WatcherHandle) -> Vec<String> {
+    match handle.lock() {
+        Ok(state) => state.watchers.keys().cloned().collect(),
+        Err(poisoned) => {
+            eprintln!("Watcher state mutex was poisoned in get_all_watching_paths");
+            poisoned.into_inner().watchers.keys().cloned().collect()
+        }
+    }
 }
 
 /// Handle a file event
-fn handle_file_event(app: &AppHandle, event: &DebouncedEvent) {
+fn handle_file_event(app: &AppHandle, event: &DebouncedEvent, watched_folder: &str) {
     // Only handle create events for new files
     let is_create = matches!(event.kind, EventKind::Create(_));
 
@@ -131,21 +244,51 @@ fn handle_file_event(app: &AppHandle, event: &DebouncedEvent) {
             continue;
         }
 
+        // SECURITY: Skip symlinks to prevent escaping watched folder
+        if path.is_symlink() {
+            continue;
+        }
+
+        // SECURITY: Verify file is within watched folder (prevents symlink escape attacks)
+        if let (Ok(canonical_path), Ok(canonical_watched)) = (
+            path.canonicalize(),
+            std::path::Path::new(watched_folder).canonicalize()
+        ) {
+            if !canonical_path.starts_with(&canonical_watched) {
+                eprintln!("Security: Skipping file outside watched folder: {:?}", path);
+                continue;
+            }
+        } else {
+            // Can't verify path safety, skip
+            continue;
+        }
+
         // Skip temporary files and hidden files
         let file_name = path
             .file_name()
             .map(|n| n.to_string_lossy().to_string())
             .unwrap_or_default();
 
-        if file_name.starts_with('.') || file_name.ends_with(".tmp") || file_name.ends_with(".crdownload") {
+        // Skip hidden files, temp files, and partial downloads
+        if file_name.starts_with('.')
+            || file_name.ends_with(".tmp")
+            || file_name.ends_with(".crdownload")
+            || file_name.ends_with(".part")
+            || file_name.ends_with(".download")
+        {
             continue;
         }
 
-        // Get file info
-        let metadata = match std::fs::metadata(path) {
+        // Get file info (use symlink_metadata to not follow symlinks)
+        let metadata = match std::fs::symlink_metadata(path) {
             Ok(m) => m,
             Err(_) => continue,
         };
+
+        // Double-check it's not a symlink via metadata
+        if metadata.file_type().is_symlink() {
+            continue;
+        }
 
         // Skip if file is still being written (size is 0)
         if metadata.len() == 0 {
@@ -156,10 +299,10 @@ fn handle_file_event(app: &AppHandle, event: &DebouncedEvent) {
             .extension()
             .map(|e| e.to_string_lossy().to_string());
 
-        // Read content preview (first 4KB for text files)
-        let content_preview = read_content_preview(path, &extension);
+        // Read content preview (first 4KB for text files) - pass watched_folder for security check
+        let content_preview = read_content_preview(path, &extension, watched_folder);
 
-        let event = FileChangeEvent {
+        let file_event = FileChangeEvent {
             id: uuid::Uuid::new_v4().to_string(),
             event_type: "created".to_string(),
             path: path.to_string_lossy().to_string(),
@@ -167,17 +310,36 @@ fn handle_file_event(app: &AppHandle, event: &DebouncedEvent) {
             extension,
             size: metadata.len(),
             content_preview,
+            watched_folder: watched_folder.to_string(),
         };
 
         // Emit event to frontend
-        if let Err(e) = app.emit("sentinel://file-created", &event) {
+        if let Err(e) = app.emit("sentinel://file-created", &file_event) {
             eprintln!("Failed to emit file event: {}", e);
         }
     }
 }
 
+/// Maximum bytes to read for content preview
+const MAX_PREVIEW_BYTES: usize = 4096;
+
 /// Read first 4KB of file content for text-based files
-fn read_content_preview(path: &PathBuf, extension: &Option<String>) -> Option<String> {
+/// SECURITY: Validates path is within watched folder before reading
+fn read_content_preview(path: &PathBuf, extension: &Option<String>, watched_folder: &str) -> Option<String> {
+    // SECURITY: Verify path is within watched folder (redundant check but defense in depth)
+    let canonical_path = path.canonicalize().ok()?;
+    let canonical_watched = std::path::Path::new(watched_folder).canonicalize().ok()?;
+
+    if !canonical_path.starts_with(&canonical_watched) {
+        eprintln!("Security: Attempted read outside watched folder: {:?}", path);
+        return None;
+    }
+
+    // SECURITY: Reject symlinks
+    if path.is_symlink() {
+        return None;
+    }
+
     let text_extensions = [
         "txt", "md", "json", "yaml", "yml", "toml", "xml", "html", "css", "js", "ts",
         "jsx", "tsx", "py", "rb", "go", "rs", "java", "c", "cpp", "h", "hpp", "swift",
@@ -192,7 +354,18 @@ fn read_content_preview(path: &PathBuf, extension: &Option<String>) -> Option<St
     // Read first 4KB
     match std::fs::read(path) {
         Ok(bytes) => {
-            let preview_bytes = &bytes[..std::cmp::min(4096, bytes.len())];
+            let preview_bytes = &bytes[..std::cmp::min(MAX_PREVIEW_BYTES, bytes.len())];
+
+            // SECURITY: Check for binary content (high proportion of non-printable chars)
+            let non_printable_count = preview_bytes.iter()
+                .filter(|&&b| b < 0x20 && b != b'\n' && b != b'\r' && b != b'\t')
+                .count();
+
+            // If more than 10% non-printable, likely binary file
+            if non_printable_count > preview_bytes.len() / 10 {
+                return None;
+            }
+
             String::from_utf8(preview_bytes.to_vec()).ok()
         }
         Err(_) => None,

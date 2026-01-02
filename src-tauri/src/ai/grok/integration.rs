@@ -21,8 +21,11 @@ use super::pdf_renderer::PdfRenderer;
 use super::summarizer::GrokSummarizer;
 use super::types::*;
 use super::vision;
+use futures::stream::{self, StreamExt};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use tokio::sync::Semaphore;
 use walkdir::WalkDir;
 
 /// Main entry point for multi-model file organization
@@ -228,58 +231,142 @@ impl GrokOrganizer {
             message: "Extracting text from documents...".to_string(),
         });
 
-        let parser = DocumentParser::new();
+        // Parallel text extraction with semaphore to limit concurrency
+        // This is ~4-8x faster than sequential extraction for large folders
+        let extraction_semaphore = Arc::new(Semaphore::new(8)); // 8 concurrent extractions
+        let progress_counter = Arc::new(AtomicUsize::new(0));
+        let total_files = all_file_paths.len();
+        let cache = Arc::clone(&self.cache);
+
+        // Define extraction result type
+        #[derive(Debug)]
+        enum ExtractionResult {
+            Cached,
+            Extracted(FileContent),
+            NeedsVision(PathBuf),
+            Skip,
+        }
+
+        // Process all files in parallel
+        let extraction_tasks: Vec<_> = all_file_paths
+            .iter()
+            .map(|path| {
+                let path = path.clone();
+                let semaphore = Arc::clone(&extraction_semaphore);
+                let cache = Arc::clone(&cache);
+                let counter = Arc::clone(&progress_counter);
+
+                async move {
+                    // Acquire semaphore permit
+                    let _permit = semaphore.acquire().await.ok()?;
+
+                    let ext = path.extension().and_then(|e| e.to_str());
+                    let filename = path
+                        .file_name()
+                        .map(|n| n.to_string_lossy().to_string())
+                        .unwrap_or_else(|| "unknown".to_string());
+
+                    // Update progress counter
+                    counter.fetch_add(1, Ordering::Relaxed);
+
+                    // Check cache first
+                    if let Ok(Some(_)) = cache.get_cached(&path) {
+                        tracing::debug!("[GrokOrganizer] Cache hit: {}", filename);
+                        return Some(ExtractionResult::Cached);
+                    }
+
+                    // Try text extraction for parseable files
+                    if is_parseable(ext) {
+                        // Run parser in blocking thread pool
+                        let path_clone = path.clone();
+                        let ext_str = ext.map(|s| s.to_string());
+                        let parsed_result = tokio::task::spawn_blocking(move || {
+                            let parser = DocumentParser::new();
+                            parser.parse(&path_clone)
+                        })
+                        .await
+                        .ok()?;
+
+                        match parsed_result {
+                            Ok(parsed) if parsed.text.len() >= 100 => {
+                                return Some(ExtractionResult::Extracted(FileContent {
+                                    path: path.clone(),
+                                    filename,
+                                    content: parsed.text.chars().take(2000).collect(),
+                                    extension: ext_str.unwrap_or_default(),
+                                }));
+                            }
+                            _ => {
+                                // Text extraction failed, try Vision API
+                                if vision::is_analyzable_extension(ext) {
+                                    return Some(ExtractionResult::NeedsVision(path));
+                                }
+                            }
+                        }
+                    } else if vision::is_analyzable_extension(ext) {
+                        // Image or scanned PDF - use Vision API
+                        return Some(ExtractionResult::NeedsVision(path));
+                    }
+
+                    Some(ExtractionResult::Skip)
+                }
+            })
+            .collect();
+
+        // Execute all extractions concurrently with progress updates
         let mut file_contents: Vec<FileContent> = Vec::new();
         let mut vision_files: Vec<PathBuf> = Vec::new();
 
-        for (i, path) in all_file_paths.iter().enumerate() {
-            let ext = path.extension().and_then(|e| e.to_str());
-            let filename = path
-                .file_name()
-                .map(|n| n.to_string_lossy().to_string())
-                .unwrap_or_else(|| "unknown".to_string());
+        // Use buffered stream to process results as they complete
+        // Add timeout per task to prevent hanging
+        let extraction_tasks_with_timeout: Vec<_> = extraction_tasks
+            .into_iter()
+            .map(|task| async move {
+                tokio::time::timeout(std::time::Duration::from_secs(30), task)
+                    .await
+                    .ok()
+                    .flatten()
+            })
+            .collect();
 
-            // Emit progress every 5 files for responsive UI updates
-            if (i + 1) % 5 == 0 || i + 1 == all_file_paths.len() {
+        let mut extraction_stream = stream::iter(extraction_tasks_with_timeout)
+            .buffer_unordered(16); // Allow up to 16 pending futures
+
+        let mut last_progress = 0;
+        while let Some(result) = extraction_stream.next().await {
+            // Emit progress every 5 files
+            let current = progress_counter.load(Ordering::Relaxed);
+            if current >= last_progress + 5 || current == total_files {
                 progress_callback(AnalysisProgress {
                     phase: AnalysisPhase::CheckingCache,
-                    current: i + 1,
-                    total: all_file_paths.len(),
+                    current,
+                    total: total_files,
                     current_file: None,
-                    message: format!("Extracting text: {}/{}", i + 1, all_file_paths.len()),
+                    message: format!("Extracting text: {}/{}", current, total_files),
                 });
+                last_progress = current;
             }
 
-            // Check cache first
-            if let Ok(Some(_)) = self.cache.get_cached(path) {
-                tracing::debug!("[GrokOrganizer] Cache hit: {}", filename);
-                continue; // Will be loaded from cache later
-            }
-
-            // Try text extraction for parseable files
-            if is_parseable(ext) {
-                match parser.parse(path) {
-                    Ok(parsed) if parsed.text.len() >= 100 => {
-                        file_contents.push(FileContent {
-                            path: path.clone(),
-                            filename: filename.clone(),
-                            content: parsed.text.chars().take(2000).collect(),
-                            extension: ext.unwrap_or("").to_string(),
-                        });
-                        continue;
-                    }
-                    _ => {
-                        // Text extraction failed, try Vision API
-                        if vision::is_analyzable_extension(ext) {
-                            vision_files.push(path.clone());
-                        }
-                    }
+            match result {
+                Some(ExtractionResult::Extracted(content)) => {
+                    file_contents.push(content);
                 }
-            } else if vision::is_analyzable_extension(ext) {
-                // Image or scanned PDF - use Vision API
-                vision_files.push(path.clone());
+                Some(ExtractionResult::NeedsVision(path)) => {
+                    vision_files.push(path);
+                }
+                Some(ExtractionResult::Cached) | Some(ExtractionResult::Skip) | None => {}
             }
         }
+
+        // Emit progress transition - extraction complete, moving to next phase
+        tracing::info!("[GrokOrganizer] Extraction phase complete, transitioning to analysis");
+        progress_callback(AnalysisProgress {
+            phase: AnalysisPhase::CheckingCache,
+            current: total_files,
+            total: total_files,
+            current_file: None,
+            message: "Text extraction complete, preparing analysis...".to_string(),
+        });
 
         // Count cache hits for files we skipped
         let cache_hits = all_file_paths.len() - file_contents.len() - vision_files.len();
@@ -375,6 +462,16 @@ impl GrokOrganizer {
             }
 
             all_analyses.extend(formatted);
+        } else {
+            // No text content to analyze - emit progress to show we're moving on
+            progress_callback(AnalysisProgress {
+                phase: AnalysisPhase::AnalyzingContent,
+                current: 0,
+                total: 0,
+                current_file: None,
+                message: "No new text content to analyze (using cache)".to_string(),
+            });
+            tracing::info!("[GrokOrganizer] No text content to analyze (all cached or vision-only)");
         }
 
         // 6. Process Vision files with existing Grok pipeline
@@ -387,7 +484,7 @@ impl GrokOrganizer {
                 message: format!("Analyzing {} image files with Vision API...", vision_files.len()),
             });
 
-            let batches = create_batches(vision_files, self.config.batch_size);
+            let batches = create_batches(vision_files.clone(), self.config.batch_size);
             let explore_results = run_parallel_explores(
                 Arc::clone(&self.client),
                 Arc::clone(&self.cache),
@@ -396,6 +493,47 @@ impl GrokOrganizer {
                 progress_callback.clone(),
             )
             .await;
+
+            // Check for auth errors across all batches
+            let mut total_failed = 0;
+            let mut auth_error_detected = false;
+
+            for result in &explore_results {
+                total_failed += result.failed_files.len();
+                // Check if any failures are auth-related
+                for (_, error) in &result.failed_files {
+                    if error.contains("Invalid or missing xAI API key")
+                        || error.contains("Incorrect API key")
+                        || error.contains("API key")
+                    {
+                        auth_error_detected = true;
+                        break;
+                    }
+                }
+            }
+
+            // Emit warning if auth errors detected
+            if auth_error_detected && total_failed > 0 {
+                progress_callback(AnalysisProgress {
+                    phase: AnalysisPhase::AnalyzingContent,
+                    current: 0,
+                    total: vision_files.len(),
+                    current_file: None,
+                    message: format!(
+                        "⚠️ Vision API failed: Invalid xAI API key. {} files skipped. Check Settings > AI Keys.",
+                        total_failed
+                    ),
+                });
+                tracing::error!(
+                    "[GrokOrganizer] Vision analysis failed: Invalid xAI API key. {} files could not be analyzed.",
+                    total_failed
+                );
+            } else if total_failed > 0 {
+                tracing::warn!(
+                    "[GrokOrganizer] Vision analysis: {} files failed (non-auth errors)",
+                    total_failed
+                );
+            }
 
             for result in explore_results {
                 all_analyses.extend(result.analyses);
@@ -523,10 +661,45 @@ impl GrokOrganizer {
             )
             .await;
 
-            // Log results
+            // Log results and check for auth errors
             let total_analyzed: usize = explore_results.iter().map(|r| r.analyses.len()).sum();
             let total_failed: usize = explore_results.iter().map(|r| r.failed_files.len()).sum();
             let total_tokens: u32 = explore_results.iter().map(|r| r.total_tokens_used).sum();
+
+            // Check for auth errors
+            let mut auth_error_detected = false;
+            for result in &explore_results {
+                for (_, error) in &result.failed_files {
+                    if error.contains("Invalid or missing xAI API key")
+                        || error.contains("Incorrect API key")
+                        || error.contains("API key")
+                    {
+                        auth_error_detected = true;
+                        break;
+                    }
+                }
+                if auth_error_detected {
+                    break;
+                }
+            }
+
+            // Emit warning if auth errors detected
+            if auth_error_detected && total_failed > 0 {
+                progress_callback(AnalysisProgress {
+                    phase: AnalysisPhase::AnalyzingContent,
+                    current: 0,
+                    total: total_failed,
+                    current_file: None,
+                    message: format!(
+                        "⚠️ Grok Vision API failed: Invalid xAI API key. {} files skipped. Check Settings > AI Keys.",
+                        total_failed
+                    ),
+                });
+                tracing::error!(
+                    "[GrokOrganizer] Grok-only analysis failed: Invalid xAI API key. {} files could not be analyzed.",
+                    total_failed
+                );
+            }
 
             tracing::info!(
                 "[GrokOrganizer] Explore complete: {} analyzed, {} failed, {} tokens",

@@ -1,16 +1,15 @@
-#[allow(unused_imports)]
 use keyring::Entry;
 use std::fs;
 use std::path::PathBuf;
 
-#[allow(dead_code)]
 const SERVICE_NAME: &str = "com.sentinel.filemanager";
 
-/// Credential manager using file storage (keychain unreliable in Tauri dev mode)
+/// Credential manager using macOS Keychain with file fallback for development
 pub struct CredentialManager;
 
 impl CredentialManager {
-    /// Get the fallback file path for storing credentials
+    /// Get the fallback file path for storing credentials (dev mode only)
+    #[cfg(debug_assertions)]
     fn get_fallback_path(provider: &str) -> Option<PathBuf> {
         dirs::config_dir().map(|dir| {
             let app_dir = dir.join("sentinel");
@@ -18,50 +17,97 @@ impl CredentialManager {
         })
     }
 
-    /// Store an API key using file storage (keychain unreliable in dev mode)
+    /// Store an API key using macOS Keychain (with file fallback in dev mode)
     pub fn store_api_key(provider: &str, api_key: &str) -> Result<(), String> {
-        // Use file storage directly - keychain is unreliable in Tauri dev mode
-        if let Some(path) = Self::get_fallback_path(provider) {
-            // Ensure directory exists
-            if let Some(parent) = path.parent() {
-                fs::create_dir_all(parent)
-                    .map_err(|e| format!("Failed to create config directory: {}", e))?;
+        // Try keychain first (secure storage)
+        match Entry::new(SERVICE_NAME, provider) {
+            Ok(entry) => {
+                if entry.set_password(api_key).is_ok() {
+                    #[cfg(debug_assertions)]
+                    eprintln!("[Credentials] Stored API key in keychain for: {}", provider);
+                    return Ok(());
+                }
             }
-
-            // Write the key (base64 encoded for minimal obfuscation)
-            let encoded = base64_encode(api_key);
-            fs::write(&path, encoded)
-                .map_err(|e| format!("Failed to write API key: {}", e))?;
-
-            eprintln!("[Credentials] Stored API key in file: {:?}", path);
-            Ok(())
-        } else {
-            Err("Could not determine config directory".to_string())
+            Err(e) => {
+                #[cfg(debug_assertions)]
+                eprintln!("[Credentials] Keychain unavailable: {}", e);
+            }
         }
+
+        // Fallback to file storage only in debug/dev mode
+        #[cfg(debug_assertions)]
+        {
+            if let Some(path) = Self::get_fallback_path(provider) {
+                if let Some(parent) = path.parent() {
+                    fs::create_dir_all(parent)
+                        .map_err(|e| format!("Failed to create config directory: {}", e))?;
+                }
+
+                // Use base64 encoding for minimal obfuscation in dev mode
+                let encoded = base64_encode(api_key);
+                fs::write(&path, encoded)
+                    .map_err(|e| format!("Failed to write API key: {}", e))?;
+
+                eprintln!("[Credentials] DEV MODE: Stored API key in file: {:?}", path);
+                return Ok(());
+            }
+        }
+
+        #[cfg(not(debug_assertions))]
+        {
+            return Err("Secure credential storage (Keychain) unavailable".to_string());
+        }
+
+        #[cfg(debug_assertions)]
+        Err("Could not determine config directory".to_string())
     }
 
-    /// Get an API key from file storage
+    /// Get an API key from Keychain (with file fallback in dev mode)
     pub fn get_api_key(provider: &str) -> Result<String, String> {
-        if let Some(path) = Self::get_fallback_path(provider) {
-            if path.exists() {
-                let encoded = fs::read_to_string(&path)
-                    .map_err(|e| format!("Failed to read API key: {}", e))?;
-                let decoded = base64_decode(&encoded)?;
-                eprintln!("[Credentials] Retrieved API key from file: {:?}", path);
-                return Ok(decoded);
+        // Try keychain first
+        if let Ok(entry) = Entry::new(SERVICE_NAME, provider) {
+            if let Ok(password) = entry.get_password() {
+                #[cfg(debug_assertions)]
+                eprintln!("[Credentials] Retrieved API key from keychain for: {}", provider);
+                return Ok(password);
+            }
+        }
+
+        // Fallback to file storage only in debug/dev mode
+        #[cfg(debug_assertions)]
+        {
+            if let Some(path) = Self::get_fallback_path(provider) {
+                if path.exists() {
+                    let encoded = fs::read_to_string(&path)
+                        .map_err(|e| format!("Failed to read API key: {}", e))?;
+                    let decoded = base64_decode(&encoded)?;
+                    eprintln!("[Credentials] DEV MODE: Retrieved API key from file: {:?}", path);
+                    return Ok(decoded);
+                }
             }
         }
 
         Err("API key not found".to_string())
     }
 
-    /// Delete an API key from file storage
+    /// Delete an API key from Keychain and file storage
     pub fn delete_api_key(provider: &str) -> Result<(), String> {
-        if let Some(path) = Self::get_fallback_path(provider) {
-            if path.exists() {
-                fs::remove_file(&path)
-                    .map_err(|e| format!("Failed to delete API key file: {}", e))?;
-                eprintln!("[Credentials] Deleted API key file: {:?}", path);
+        // Delete from keychain
+        if let Ok(entry) = Entry::new(SERVICE_NAME, provider) {
+            let _ = entry.delete_credential();
+            #[cfg(debug_assertions)]
+            eprintln!("[Credentials] Deleted API key from keychain for: {}", provider);
+        }
+
+        // Also delete from file storage in dev mode
+        #[cfg(debug_assertions)]
+        {
+            if let Some(path) = Self::get_fallback_path(provider) {
+                if path.exists() {
+                    fs::remove_file(&path)
+                        .map_err(|e| format!("Failed to delete API key file: {}", e))?;
+                    eprintln!("[Credentials] DEV MODE: Deleted API key file: {:?}", path);
+                }
             }
         }
 
@@ -72,9 +118,35 @@ impl CredentialManager {
     pub fn has_api_key(provider: &str) -> bool {
         Self::get_api_key(provider).is_ok()
     }
+
+    /// Migrate existing file-based credentials to keychain
+    #[cfg(debug_assertions)]
+    pub fn migrate_to_keychain(provider: &str) -> Result<bool, String> {
+        // Check if file-based credential exists
+        if let Some(path) = Self::get_fallback_path(provider) {
+            if path.exists() {
+                // Read from file
+                let encoded = fs::read_to_string(&path)
+                    .map_err(|e| format!("Failed to read API key: {}", e))?;
+                let api_key = base64_decode(&encoded)?;
+
+                // Store in keychain
+                if let Ok(entry) = Entry::new(SERVICE_NAME, provider) {
+                    if entry.set_password(&api_key).is_ok() {
+                        // Delete the file after successful migration
+                        let _ = fs::remove_file(&path);
+                        eprintln!("[Credentials] Migrated {} from file to keychain", provider);
+                        return Ok(true);
+                    }
+                }
+            }
+        }
+        Ok(false)
+    }
 }
 
-// Simple base64 encoding/decoding for minimal obfuscation
+// Base64 encoding/decoding for dev mode file storage
+#[cfg(debug_assertions)]
 fn base64_encode(input: &str) -> String {
     use std::io::Write;
     let mut output = Vec::new();
@@ -85,20 +157,23 @@ fn base64_encode(input: &str) -> String {
     String::from_utf8(output).unwrap()
 }
 
+#[cfg(debug_assertions)]
 fn base64_decode(input: &str) -> Result<String, String> {
     let bytes = base64_decode_bytes(input.trim())?;
     String::from_utf8(bytes).map_err(|e| format!("Invalid UTF-8: {}", e))
 }
 
-// Manual base64 implementation to avoid adding dependencies
+#[cfg(debug_assertions)]
 const BASE64_CHARS: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
+#[cfg(debug_assertions)]
 struct Base64Encoder<'a, W: std::io::Write> {
     writer: &'a mut W,
     buffer: [u8; 3],
     buffer_len: usize,
 }
 
+#[cfg(debug_assertions)]
 impl<'a, W: std::io::Write> Base64Encoder<'a, W> {
     fn new(writer: &'a mut W) -> Self {
         Self {
@@ -136,6 +211,7 @@ impl<'a, W: std::io::Write> Base64Encoder<'a, W> {
     }
 }
 
+#[cfg(debug_assertions)]
 impl<'a, W: std::io::Write> std::io::Write for Base64Encoder<'a, W> {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
         for &byte in buf {
@@ -153,12 +229,14 @@ impl<'a, W: std::io::Write> std::io::Write for Base64Encoder<'a, W> {
     }
 }
 
+#[cfg(debug_assertions)]
 impl<'a, W: std::io::Write> Drop for Base64Encoder<'a, W> {
     fn drop(&mut self) {
         let _ = self.flush_buffer();
     }
 }
 
+#[cfg(debug_assertions)]
 fn base64_decode_bytes(input: &str) -> Result<Vec<u8>, String> {
     let mut output = Vec::new();
     let input = input.as_bytes();

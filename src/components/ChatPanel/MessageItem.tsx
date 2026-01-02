@@ -1,9 +1,10 @@
-import { useState, memo } from 'react';
+import { useState, memo, useCallback, type ReactNode } from 'react';
 import Markdown from 'react-markdown';
-import { Copy, ThumbsUp, ThumbsDown, RotateCcw, Brain, ChevronRight, File, Folder, Image } from 'lucide-react';
+import { Copy, ThumbsUp, ThumbsDown, RotateCcw, Brain, ChevronRight, File, Folder, Image, Check } from 'lucide-react';
 import type { ChatMessage, ContextItem } from '../../stores/chat-store';
 import { ThoughtAccordion } from './ThoughtAccordion';
 import { StreamingIndicator, ThinkingDots, ShimmerText } from './StreamingIndicator';
+import { cn } from '../../lib/utils';
 
 // Allowed URL protocols to prevent XSS via javascript: URLs
 const ALLOWED_URL_PROTOCOLS = ['http:', 'https:', 'mailto:', 'tel:'];
@@ -86,6 +87,69 @@ function AttachmentChips({ items }: { items: ContextItem[] }) {
       })}
     </div>
   );
+}
+
+/**
+ * Code block component with copy button
+ */
+function CodeBlock({ children, className }: { children: ReactNode; className?: string }) {
+  const [copied, setCopied] = useState(false);
+
+  const handleCopy = useCallback(() => {
+    // Extract text content from children
+    const text = extractTextFromChildren(children);
+    navigator.clipboard.writeText(text);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 2000);
+  }, [children]);
+
+  return (
+    <div className="relative group my-4 first:mt-0 last:mb-0">
+      {/* Copy button - top right */}
+      <button
+        onClick={handleCopy}
+        className={cn(
+          'absolute top-2 right-2 p-1.5 rounded-md transition-all z-10',
+          'opacity-0 group-hover:opacity-100',
+          copied
+            ? 'bg-green-500/20 text-green-400'
+            : 'bg-white/10 hover:bg-white/20 text-gray-400 hover:text-gray-200'
+        )}
+        title={copied ? 'Copied!' : 'Copy code'}
+      >
+        {copied ? <Check size={14} /> : <Copy size={14} />}
+      </button>
+
+      {/* Code content */}
+      <pre className={cn(
+        'bg-[#1a1a1a] border border-white/10 rounded-lg p-4 pr-12 overflow-x-auto',
+        className
+      )}>
+        {children}
+      </pre>
+    </div>
+  );
+}
+
+/**
+ * Extract plain text from React children (for copy functionality)
+ */
+function extractTextFromChildren(children: ReactNode): string {
+  if (typeof children === 'string') return children;
+  if (typeof children === 'number') return String(children);
+  if (children === null || children === undefined) return '';
+
+  if (Array.isArray(children)) {
+    return children.map(extractTextFromChildren).join('');
+  }
+
+  // Handle React elements
+  if (typeof children === 'object' && children !== null && 'props' in children) {
+    const element = children as { props: { children?: ReactNode } };
+    return extractTextFromChildren(element.props.children);
+  }
+
+  return '';
 }
 
 export const MessageItem = memo(function MessageItem({ message }: MessageItemProps) {
@@ -209,24 +273,49 @@ export const MessageItem = memo(function MessageItem({ message }: MessageItemPro
                       </a>
                     );
                   },
-                  // Code blocks
+                  // Pre blocks (wraps code blocks) - use CodeBlock component with copy button
+                  pre: ({ children }) => (
+                    <CodeBlock>{children}</CodeBlock>
+                  ),
+                  // Code - inline vs block styling
                   code: ({ className, children }) => {
-                    const isInline = !className;
-                    return isInline ? (
-                      <code className="bg-white/10 px-1.5 py-0.5 rounded text-xs">
+                    // Determine if block code:
+                    // 1. Has className (fenced code with language like ```js)
+                    // 2. Content contains newlines (plain fenced code ```)
+                    const content = String(children || '');
+                    const isBlock = !!className || content.includes('\n');
+
+                    return isBlock ? (
+                      // Block code inside pre - just style the text
+                      <code className="text-xs font-mono text-gray-200 block whitespace-pre">
                         {children}
                       </code>
                     ) : (
-                      <code className="block bg-white/5 p-3 rounded-lg text-xs overflow-x-auto">
+                      // Inline code
+                      <code className="bg-white/10 px-1.5 py-0.5 rounded text-xs font-mono text-orange-300">
                         {children}
                       </code>
                     );
                   },
-                  // Paragraphs
-                  p: ({ children }) => <p className="mb-3 last:mb-0 leading-relaxed">{children}</p>,
+                  // Paragraphs - clear separation from code blocks
+                  p: ({ children }) => (
+                    <p className="mb-4 last:mb-0 leading-relaxed">{children}</p>
+                  ),
                   // Lists
-                  ul: ({ children }) => <ul className="list-disc pl-4 mb-3 space-y-1">{children}</ul>,
-                  ol: ({ children }) => <ol className="list-decimal pl-4 mb-3 space-y-1">{children}</ol>,
+                  ul: ({ children }) => <ul className="list-disc pl-4 mb-4 space-y-1">{children}</ul>,
+                  ol: ({ children }) => <ol className="list-decimal pl-4 mb-4 space-y-1">{children}</ol>,
+                  // Headings
+                  h1: ({ children }) => <h1 className="text-lg font-semibold mb-3 mt-4 first:mt-0">{children}</h1>,
+                  h2: ({ children }) => <h2 className="text-base font-semibold mb-2 mt-4 first:mt-0">{children}</h2>,
+                  h3: ({ children }) => <h3 className="text-sm font-semibold mb-2 mt-3 first:mt-0">{children}</h3>,
+                  // Block quotes
+                  blockquote: ({ children }) => (
+                    <blockquote className="border-l-2 border-gray-500 pl-3 my-3 text-gray-400 italic">
+                      {children}
+                    </blockquote>
+                  ),
+                  // Horizontal rule
+                  hr: () => <hr className="my-4 border-white/10" />,
                 }}
               >
                 {message.content}

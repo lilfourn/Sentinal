@@ -108,11 +108,13 @@ impl SubscriptionManager {
     }
 
     /// Invalidate cache for a user (forces refresh on next access)
+    #[allow(dead_code)]
     pub fn invalidate(&self, user_id: &str) {
         self.clear_cache(user_id);
     }
 
     /// Check if user has Pro subscription
+    #[allow(dead_code)]
     pub fn is_pro(&self, user_id: &str) -> bool {
         if let Some(sub) = self.get_cached(user_id) {
             sub.tier == SubscriptionTier::Pro
@@ -124,6 +126,7 @@ impl SubscriptionManager {
     }
 
     /// Check if subscription is active (not canceled or past_due)
+    #[allow(dead_code)]
     pub fn is_active(&self, user_id: &str) -> bool {
         if let Some(sub) = self.get_cached(user_id) {
             sub.status == SubscriptionStatus::Active

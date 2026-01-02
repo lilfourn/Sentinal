@@ -14,9 +14,12 @@ use super::document_parser::{DocumentParser, ExtractionMethod, ParsedDocument};
 use super::pdf_renderer::PdfRenderer;
 use super::types::*;
 use super::vision;
+use futures::stream::{self, StreamExt};
 use std::path::Path;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
+use tokio::sync::Semaphore;
 
 /// Explore agent for analyzing document batches
 pub struct ExploreAgent {
@@ -44,7 +47,8 @@ impl ExploreAgent {
         }
     }
 
-    /// Process a batch of files
+    /// Process a batch of files in parallel within the batch
+    /// Uses semaphore to limit concurrent API calls while maximizing throughput
     pub async fn process_batch<F>(
         &self,
         files: Vec<std::path::PathBuf>,
@@ -55,53 +59,147 @@ impl ExploreAgent {
     {
         let start = Instant::now();
         let total = files.len();
+        let batch_id = self.batch_id;
+
+        tracing::info!(
+            "[ExploreAgent {}] Processing {} files in parallel",
+            batch_id,
+            total
+        );
+
+        // Limit concurrent analyses within batch (API rate limiting)
+        let semaphore = Arc::new(Semaphore::new(4)); // 4 concurrent within batch
+        let progress_counter = Arc::new(AtomicUsize::new(0));
+
+        // Wrap shared resources in Arcs for parallel access
+        let client = Arc::clone(&self.client);
+        let cache = Arc::clone(&self.cache);
+        let pdf_renderer = Arc::clone(&self.pdf_renderer);
+
+        // Create analysis tasks
+        let analysis_tasks: Vec<_> = files
+            .into_iter()
+            .map(|file_path| {
+                let semaphore = Arc::clone(&semaphore);
+                let counter = Arc::clone(&progress_counter);
+                let client = Arc::clone(&client);
+                let cache = Arc::clone(&cache);
+                let pdf_renderer = Arc::clone(&pdf_renderer);
+
+                async move {
+                    // Acquire semaphore permit
+                    let _permit = semaphore.acquire().await.ok()?;
+
+                    // Update progress
+                    counter.fetch_add(1, Ordering::Relaxed);
+
+                    // Analyze the file
+                    let result = Self::analyze_file_static(
+                        &file_path,
+                        &client,
+                        &cache,
+                        &pdf_renderer,
+                        batch_id,
+                    )
+                    .await;
+
+                    Some((file_path, result))
+                }
+            })
+            .collect();
+
+        // Execute all analyses concurrently
         let mut analyses = Vec::new();
         let mut failed_files = Vec::new();
         let mut tokens_used = 0u32;
 
-        tracing::info!(
-            "[ExploreAgent {}] Processing {} files",
-            self.batch_id,
-            total
-        );
+        // Track consecutive auth errors for early abort
+        let mut consecutive_auth_errors = 0;
+        const MAX_AUTH_ERRORS: usize = 3;
 
-        for (i, file_path) in files.iter().enumerate() {
+        let mut analysis_stream = stream::iter(analysis_tasks)
+            .buffer_unordered(8); // Allow up to 8 pending futures
+
+        let mut last_progress = 0;
+        let mut aborted = false;
+
+        while let Some(result) = analysis_stream.next().await {
             // Emit progress
-            progress_callback(AnalysisProgress {
-                phase: AnalysisPhase::AnalyzingContent,
-                current: i + 1,
-                total,
-                current_file: Some(file_path.to_string_lossy().to_string()),
-                message: format!(
-                    "Batch {}: Analyzing {}/{}",
-                    self.batch_id,
-                    i + 1,
-                    total
-                ),
-            });
+            let current = progress_counter.load(Ordering::Relaxed);
+            if current > last_progress {
+                progress_callback(AnalysisProgress {
+                    phase: AnalysisPhase::AnalyzingContent,
+                    current,
+                    total,
+                    current_file: None,
+                    message: format!("Batch {}: Analyzing {}/{}", batch_id, current, total),
+                });
+                last_progress = current;
+            }
 
-            match self.analyze_file(file_path).await {
-                Ok((analysis, file_tokens)) => {
-                    tokens_used += file_tokens;
-                    analyses.push(analysis);
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        "[ExploreAgent {}] Failed to analyze {}: {}",
-                        self.batch_id,
-                        file_path.display(),
-                        e
-                    );
-                    failed_files.push((file_path.to_string_lossy().to_string(), e));
+            if let Some((file_path, analysis_result)) = result {
+                match analysis_result {
+                    Ok((analysis, file_tokens)) => {
+                        tokens_used += file_tokens;
+                        analyses.push(analysis);
+                        // Reset auth error counter on success
+                        consecutive_auth_errors = 0;
+                    }
+                    Err(e) => {
+                        // Check if this is an auth error (invalid API key)
+                        let is_auth_error = e.contains("Incorrect API key")
+                            || e.contains("Invalid API key")
+                            || e.contains("invalid_api_key")
+                            || e.contains("401")
+                            || (e.contains("400") && e.contains("API key"));
+
+                        if is_auth_error {
+                            consecutive_auth_errors += 1;
+                            tracing::warn!(
+                                "[ExploreAgent {}] Auth error ({}/{}): {}",
+                                batch_id,
+                                consecutive_auth_errors,
+                                MAX_AUTH_ERRORS,
+                                e
+                            );
+
+                            // Abort early on repeated auth errors
+                            if consecutive_auth_errors >= MAX_AUTH_ERRORS {
+                                tracing::error!(
+                                    "[ExploreAgent {}] ABORTING: {} consecutive auth errors. Check your xAI API key.",
+                                    batch_id,
+                                    consecutive_auth_errors
+                                );
+                                // Mark remaining files as failed with clear error message
+                                let abort_error = "Batch aborted: Invalid or missing xAI API key. Please check Settings > AI Keys.".to_string();
+                                failed_files.push((file_path.to_string_lossy().to_string(), abort_error));
+                                aborted = true;
+                                break;
+                            }
+                        }
+
+                        tracing::warn!(
+                            "[ExploreAgent {}] Failed to analyze {}: {}",
+                            batch_id,
+                            file_path.display(),
+                            e
+                        );
+                        failed_files.push((file_path.to_string_lossy().to_string(), e));
+                    }
                 }
             }
+        }
+
+        // If aborted, drop remaining tasks
+        if aborted {
+            drop(analysis_stream);
         }
 
         let duration_ms = start.elapsed().as_millis() as u64;
 
         tracing::info!(
             "[ExploreAgent {}] Completed: {} analyzed, {} failed, {} tokens, {}ms",
-            self.batch_id,
+            batch_id,
             analyses.len(),
             failed_files.len(),
             tokens_used,
@@ -109,12 +207,302 @@ impl ExploreAgent {
         );
 
         ExploreResult {
-            batch_id: self.batch_id,
+            batch_id,
             analyses,
             failed_files,
             total_tokens_used: tokens_used,
             duration_ms,
         }
+    }
+
+    /// Static version of analyze_file for parallel execution
+    async fn analyze_file_static(
+        path: &Path,
+        client: &Arc<GrokClient>,
+        cache: &Arc<ContentCache>,
+        pdf_renderer: &Arc<PdfRenderer>,
+        batch_id: usize,
+    ) -> Result<(DocumentAnalysis, u32), String> {
+        let filename = path
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| "unknown".to_string());
+
+        let ext = path.extension().and_then(|e| e.to_str());
+
+        tracing::debug!(
+            "[ExploreAgent {}] Analyzing file: {} (ext: {:?})",
+            batch_id,
+            filename,
+            ext
+        );
+
+        // 1. Check cache first
+        if let Ok(Some(mut cached)) = cache.get_cached(path) {
+            cached.file_path = path.to_string_lossy().to_string();
+            cached.method = AnalysisMethod::Cached;
+            tracing::debug!(
+                "[ExploreAgent {}] Cache HIT: {}",
+                batch_id,
+                filename
+            );
+            return Ok((cached, 0));
+        }
+
+        // 2. Try text extraction first (pure Rust, no API call needed)
+        let ext_str = ext.map(|s| s.to_string());
+        if super::document_parser::is_parseable(ext) {
+            let path_for_parse = path.to_path_buf();
+            let parsed_result = tokio::task::spawn_blocking(move || {
+                let parser = DocumentParser::new();
+                parser.parse(&path_for_parse)
+            })
+            .await
+            .map_err(|e| format!("Parse task failed: {}", e))?;
+
+            if let Ok(parsed) = parsed_result {
+                if parsed.text.len() >= 100 && parsed.method != ExtractionMethod::Failed {
+                    // Successfully extracted text - analyze with Grok text API
+                    let text_preview: String = parsed.text.chars().take(4000).collect();
+
+                    tracing::debug!(
+                        "[ExploreAgent {}] Text extraction SUCCESS: {} chars from {}",
+                        batch_id,
+                        text_preview.len(),
+                        filename
+                    );
+
+                    return Self::analyze_text_content_static(
+                        path,
+                        &filename,
+                        &text_preview,
+                        ext_str.as_deref(),
+                        client,
+                        cache,
+                        batch_id,
+                    )
+                    .await;
+                }
+            }
+        }
+
+        // 3. Fall back to Vision API for scanned/image documents
+        if vision::is_analyzable_extension(ext) {
+            tracing::debug!(
+                "[ExploreAgent {}] Falling back to Vision API for {}",
+                batch_id,
+                filename
+            );
+            return Self::analyze_with_vision_static(
+                path,
+                &filename,
+                ext,
+                client,
+                cache,
+                pdf_renderer,
+                batch_id,
+            )
+            .await;
+        }
+
+        Err(format!(
+            "Cannot analyze file type: {:?}",
+            ext.unwrap_or("unknown")
+        ))
+    }
+
+    /// Analyze text content using Grok text API (static version)
+    async fn analyze_text_content_static(
+        path: &Path,
+        filename: &str,
+        text: &str,
+        _ext: Option<&str>,
+        _client: &Arc<GrokClient>,
+        cache: &Arc<ContentCache>,
+        batch_id: usize,
+    ) -> Result<(DocumentAnalysis, u32), String> {
+        use reqwest::Client;
+        use serde_json::json;
+
+        let prompt = format!(
+            r#"Analyze this document and extract SPECIFIC information for file organization.
+
+FILENAME: {}
+
+DOCUMENT CONTENT:
+{}
+
+Respond with ONLY this JSON format:
+{{
+  "content_summary": "3-4 sentences covering WHO, WHAT, WHEN, and amounts found",
+  "document_type": "one of: invoice, contract, report, letter, form, receipt, statement, proposal, presentation, spreadsheet, manual, certificate, resume, photo, unknown",
+  "key_entities": ["specific names, dates, amounts found"],
+  "suggested_name": "Entity-Description-Date format, use hyphens not spaces"
+}}"#,
+            filename, text
+        );
+
+        let api_key = std::env::var("XAI_API_KEY")
+            .or_else(|_| std::env::var("GROK_API_KEY"))
+            .or_else(|_| std::env::var("VITE_XAI_API_KEY"))
+            .map_err(|_| "No Grok API key found")?;
+
+        let http_client = Client::new();
+        let response = http_client
+            .post("https://api.x.ai/v1/chat/completions")
+            .header("Authorization", format!("Bearer {}", api_key))
+            .header("Content-Type", "application/json")
+            .json(&json!({
+                "model": "grok-4-1-fast",
+                "messages": [{"role": "user", "content": prompt}],
+                "max_tokens": 500,
+                "temperature": 0.1
+            }))
+            .send()
+            .await
+            .map_err(|e| format!("API request failed: {}", e))?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let error_text = response.text().await.unwrap_or_default();
+            return Err(format!("Grok API error ({}): {}", status, error_text));
+        }
+
+        #[derive(serde::Deserialize)]
+        struct GrokResponse { choices: Vec<Choice> }
+        #[derive(serde::Deserialize)]
+        struct Choice { message: Message }
+        #[derive(serde::Deserialize)]
+        struct Message { content: String }
+
+        let grok_resp: GrokResponse = response
+            .json()
+            .await
+            .map_err(|e| format!("Failed to parse Grok response: {}", e))?;
+
+        let content = grok_resp
+            .choices
+            .first()
+            .map(|c| c.message.content.clone())
+            .ok_or("No response from Grok")?;
+
+        // Parse JSON from response
+        let analysis = Self::parse_json_analysis_response(path, filename, &content)?;
+
+        // Estimate tokens: ~input/4 + output/4 + overhead
+        let estimated_tokens = ((text.len() / 4) + (content.len() / 4) + 100) as u32;
+
+        // Cache the result
+        if let Err(e) = cache.store(path, &analysis, estimated_tokens) {
+            tracing::warn!(
+                "[ExploreAgent {}] Failed to cache analysis: {}",
+                batch_id,
+                e
+            );
+        }
+
+        Ok((analysis, estimated_tokens))
+    }
+
+    /// Parse JSON analysis response
+    fn parse_json_analysis_response(
+        path: &Path,
+        filename: &str,
+        content: &str,
+    ) -> Result<DocumentAnalysis, String> {
+        #[derive(serde::Deserialize)]
+        struct AnalysisResponse {
+            content_summary: String,
+            document_type: String,
+            key_entities: Vec<String>,
+            suggested_name: Option<String>,
+        }
+
+        // Extract JSON from response (handle markdown code blocks)
+        let json_str = if let Some(start) = content.find('{') {
+            if let Some(end) = content.rfind('}') {
+                &content[start..=end]
+            } else {
+                content
+            }
+        } else {
+            content
+        };
+
+        let parsed: AnalysisResponse = serde_json::from_str(json_str)
+            .map_err(|e| format!("Failed to parse analysis JSON: {}", e))?;
+
+        let document_type = match parsed.document_type.to_lowercase().as_str() {
+            "invoice" => DocumentType::Invoice,
+            "contract" => DocumentType::Contract,
+            "report" => DocumentType::Report,
+            "letter" => DocumentType::Letter,
+            "form" => DocumentType::Form,
+            "receipt" => DocumentType::Receipt,
+            "statement" => DocumentType::Statement,
+            "proposal" => DocumentType::Proposal,
+            "presentation" => DocumentType::Presentation,
+            "spreadsheet" => DocumentType::Spreadsheet,
+            "manual" => DocumentType::Manual,
+            "certificate" => DocumentType::Certificate,
+            "resume" => DocumentType::Resume,
+            "photo" => DocumentType::Photo,
+            _ => DocumentType::Unknown,
+        };
+
+        Ok(DocumentAnalysis {
+            file_path: path.to_string_lossy().to_string(),
+            file_name: filename.to_string(),
+            content_summary: parsed.content_summary,
+            document_type,
+            key_entities: parsed.key_entities,
+            confidence: 0.85,
+            suggested_name: parsed.suggested_name,
+            method: AnalysisMethod::TextExtraction,
+        })
+    }
+
+    /// Analyze using Vision API (static version)
+    async fn analyze_with_vision_static(
+        path: &Path,
+        filename: &str,
+        ext: Option<&str>,
+        client: &Arc<GrokClient>,
+        cache: &Arc<ContentCache>,
+        pdf_renderer: &Arc<PdfRenderer>,
+        batch_id: usize,
+    ) -> Result<(DocumentAnalysis, u32), String> {
+        // Get image data
+        let image_data = if ext == Some("pdf") {
+            // Render first page of PDF
+            pdf_renderer.render_first_page(path).await?
+        } else {
+            // Read image file directly
+            std::fs::read(path).map_err(|e| format!("Failed to read image: {}", e))?
+        };
+
+        // Use GrokClient's analyze_document_image method
+        let mut analysis = client
+            .analyze_document_image(&image_data, filename, None)
+            .await?;
+
+        // Update file path (client doesn't know the path)
+        analysis.file_path = path.to_string_lossy().to_string();
+        analysis.method = AnalysisMethod::GrokVision;
+
+        // Vision API tokens estimate
+        let estimated_tokens = 1500u32;
+
+        // Cache the result
+        if let Err(e) = cache.store(path, &analysis, estimated_tokens) {
+            tracing::warn!(
+                "[ExploreAgent {}] Failed to cache analysis: {}",
+                batch_id,
+                e
+            );
+        }
+
+        Ok((analysis, estimated_tokens))
     }
 
     /// Analyze a single file

@@ -26,7 +26,7 @@
       }
     ],
     "security": {
-      "csp": null
+      "csp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'self' https://*.convex.cloud https://api.anthropic.com https://api.stripe.com https://*.clerk.dev https://*.clerk.accounts.dev wss://*.convex.cloud; img-src 'self' data: https:; font-src 'self' data:"
     }
   },
   "bundle": {

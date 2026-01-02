@@ -3,6 +3,7 @@ import { invoke } from '@tauri-apps/api/core';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import type { NamingConvention } from '../types/naming-convention';
 import type { OperationStatus, WalEntry, WalRecoveryInfo, WalRecoveryResult } from '../types/ghost';
+import { queryClient } from '../lib/query-client';
 
 // Module-level storage for active listener cleanup functions
 // These need to be cleaned up when the organizer is closed
@@ -35,6 +36,14 @@ interface ExecutionResult {
   errors: string[];
   skipped: string[];
   success: boolean;
+}
+
+// Detailed execution error for UI display
+export interface ExecutionError {
+  message: string;
+  operationType?: string;
+  source?: string;
+  destination?: string;
 }
 
 export interface OrganizeOperation {
@@ -167,6 +176,9 @@ interface OrganizeState {
   // When organization completes, these are set to trigger file list refresh
   lastCompletedAt: number | null;
   completedTargetFolder: string | null;
+
+  // Detailed execution errors for error dialog display
+  executionErrors: ExecutionError[];
 }
 
 // Info about an interrupted job for recovery UI
@@ -324,6 +336,7 @@ export const useOrganizeStore = create<OrganizeState & OrganizeActions>((set, ge
   analysisProgress: null,
   lastCompletedAt: null,
   completedTargetFolder: null,
+  executionErrors: [],
 
   // Thought actions
   addThought: (type, content, detail, expandableDetails) => set((state) => ({
@@ -380,6 +393,7 @@ export const useOrganizeStore = create<OrganizeState & OrganizeActions>((set, ge
       selectedConvention: null,
       conventionSkipped: false,
       phase: 'idle',
+      executionErrors: [],
     });
 
     state.addThought('scanning', `Ready to organize ${folderName}`, 'Provide instructions to begin');
@@ -419,6 +433,7 @@ export const useOrganizeStore = create<OrganizeState & OrganizeActions>((set, ge
       suggestedConventions: null,
       selectedConvention: null,
       conventionSkipped: false,
+      executionErrors: [],
     });
   },
 
@@ -887,6 +902,26 @@ export const useOrganizeStore = create<OrganizeState & OrganizeActions>((set, ge
 
     // Set up event listener for progress updates from backend
     let unlisten: UnlistenFn | null = null;
+    let unlistenOpComplete: UnlistenFn | null = null;
+
+    // V7: Debounced directory refresh for hot reload
+    // Collect affected directories and batch refresh every 150ms
+    const pendingDirs = new Set<string>();
+    let debounceTimer: ReturnType<typeof setTimeout> | null = null;
+
+    const flushPendingRefresh = () => {
+      if (pendingDirs.size > 0) {
+        console.log('[organize-store] Hot reload: refreshing', pendingDirs.size, 'directories');
+        for (const dir of pendingDirs) {
+          queryClient.invalidateQueries({
+            queryKey: ['directory', dir],
+            exact: false, // Match any showHidden value
+          });
+        }
+        pendingDirs.clear();
+      }
+    };
+
     try {
       unlisten = await listen<{ completed: number; total: number }>('execution-progress', (event) => {
         get().setExecutionProgress({
@@ -895,8 +930,23 @@ export const useOrganizeStore = create<OrganizeState & OrganizeActions>((set, ge
           phase: 'executing',
         });
       });
+
+      // V7: Listen for per-operation completion events for hot reload
+      unlistenOpComplete = await listen<{ affectedDirs: string[] }>('execution-op-complete', (event) => {
+        const dirs = event.payload.affectedDirs;
+        if (dirs && dirs.length > 0) {
+          // Add to pending set
+          for (const dir of dirs) {
+            pendingDirs.add(dir);
+          }
+
+          // Debounce: reset timer and flush after 150ms of no new events
+          if (debounceTimer) clearTimeout(debounceTimer);
+          debounceTimer = setTimeout(flushPendingRefresh, 150);
+        }
+      });
     } catch {
-      // Event listener failed, continue without real-time progress
+      // Event listener failed, continue without real-time progress/refresh
     }
 
     try {
@@ -924,8 +974,11 @@ export const useOrganizeStore = create<OrganizeState & OrganizeActions>((set, ge
         originalFolder: get().targetFolder, // Original folder for empty directory cleanup
       });
 
-      // Clean up listener
+      // Clean up listeners and flush any pending refreshes
       if (unlisten) unlisten();
+      if (unlistenOpComplete) unlistenOpComplete();
+      if (debounceTimer) clearTimeout(debounceTimer);
+      flushPendingRefresh(); // Final flush for any remaining directories
 
       if (result.success) {
         // Mark all operations as completed
@@ -989,20 +1042,32 @@ export const useOrganizeStore = create<OrganizeState & OrganizeActions>((set, ge
         }
         get().addThought('error', 'Some operations failed', errorDetail);
 
-        set({ phase: 'failed', isExecuting: false });
+        // V7: Store all execution errors for detailed error dialog
+        const executionErrors: ExecutionError[] = result.errors.map((msg) => ({
+          message: msg,
+        }));
 
-        // Persist failure
+        set({
+          phase: 'failed',
+          isExecuting: false,
+          executionErrors,
+        });
+
+        // Persist failure (keep up to 10 errors for logging)
         const jobId = get().currentJobId;
         if (jobId && !jobId.startsWith('local-')) {
           invoke('fail_organize_job', {
             jobId,
-            error: `${result.failedCount} operations failed: ${result.errors.slice(0, 3).join('; ')}`
+            error: `${result.failedCount} operations failed: ${result.errors.slice(0, 10).join('; ')}`
           }).catch(console.error);
         }
       }
     } catch (error) {
-      // Clean up listener
+      // Clean up listeners and flush any pending refreshes
       if (unlisten) unlisten();
+      if (unlistenOpComplete) unlistenOpComplete();
+      if (debounceTimer) clearTimeout(debounceTimer);
+      flushPendingRefresh(); // Final flush for any remaining directories
 
       get().setExecutionProgress({
         completed: 0,

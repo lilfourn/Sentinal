@@ -528,6 +528,27 @@ export const getByStripeCustomer = internalQuery({
 });
 
 /**
+ * Get subscription by Clerk token identifier (internal)
+ * Used for verifying customer ownership in billing portal
+ */
+export const getByTokenIdentifier = internalQuery({
+  args: { tokenIdentifier: v.string() },
+  handler: async (ctx, args) => {
+    const user = await ctx.db
+      .query("users")
+      .withIndex("by_token", (q) => q.eq("tokenIdentifier", args.tokenIdentifier))
+      .first();
+
+    if (!user) return null;
+
+    return await ctx.db
+      .query("subscriptions")
+      .withIndex("by_user", (q) => q.eq("userId", user._id))
+      .first();
+  },
+});
+
+/**
  * Cleanup old webhook events (run periodically)
  */
 export const cleanupOldWebhookEvents = internalMutation({

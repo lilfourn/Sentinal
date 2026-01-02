@@ -138,6 +138,7 @@ impl DocumentParser {
     }
 
     /// Extract text from PDF using pdf-extract
+    /// Wrapped in catch_unwind to handle panics from malformed PDFs
     fn extract_pdf(&self, path: &Path) -> Result<ParsedDocument, String> {
         tracing::info!("[DocumentParser] Starting PDF extraction: {}", path.display());
 
@@ -146,15 +147,26 @@ impl DocumentParser {
 
         tracing::debug!("[DocumentParser] PDF file size: {} bytes", bytes.len());
 
-        let text = match pdf_extract::extract_text_from_mem(&bytes) {
-            Ok(t) => t,
-            Err(e) => {
+        // Use catch_unwind to handle panics from malformed PDFs
+        // The pdf_extract crate (and its cff-parser dependency) can panic on certain fonts/glyphs
+        let text = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            pdf_extract::extract_text_from_mem(&bytes)
+        })) {
+            Ok(Ok(t)) => t,
+            Ok(Err(e)) => {
                 tracing::warn!(
                     "[DocumentParser] PDF extraction FAILED for {}: {}",
                     path.display(),
                     e
                 );
                 return Err(format!("PDF extraction failed: {}", e));
+            }
+            Err(_panic) => {
+                tracing::error!(
+                    "[DocumentParser] PDF extraction PANICKED for {} - likely malformed font/glyph",
+                    path.display()
+                );
+                return Err("PDF extraction panicked - likely contains malformed fonts".to_string());
             }
         };
 

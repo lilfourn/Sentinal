@@ -3,6 +3,7 @@ import { persist } from 'zustand/middleware';
 import { invoke } from '@tauri-apps/api/core';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import { useSubscriptionStore, chatModelToSubscriptionModel } from './subscription-store';
+import { showInfo } from './toast-store';
 
 // ============================================================================
 // MODULE-LEVEL STATE FOR LISTENER CLEANUP
@@ -13,6 +14,9 @@ let activeListenerCleanup: (() => void) | null = null;
 
 /** Auto-recovery timeout for error state */
 const ERROR_AUTO_RECOVERY_MS = 30000;
+
+/** Maximum number of files that can be attached to a single chat message */
+export const MAX_CONTEXT_ITEMS = 10;
 
 // ============================================================================
 // TYPES
@@ -171,6 +175,17 @@ export const useChatStore = create<ChatState & ChatActions>()(
 
   // Context actions
   addContext: (item) => {
+    const { activeContext } = get();
+
+    // Check if item already exists (will be replaced, not added)
+    const isReplacement = activeContext.some(c => c.path === item.path);
+
+    // Check limit only for new items
+    if (!isReplacement && activeContext.length >= MAX_CONTEXT_ITEMS) {
+      showInfo('Attachment limit reached', `Maximum ${MAX_CONTEXT_ITEMS} files can be attached per message`);
+      return;
+    }
+
     const newItem: ContextItem = {
       ...item,
       id: crypto.randomUUID(),
@@ -184,7 +199,34 @@ export const useChatStore = create<ChatState & ChatActions>()(
   addContextBatch: (items) => {
     if (items.length === 0) return;
 
-    const newItems: ContextItem[] = items.map((item) => ({
+    const { activeContext } = get();
+
+    // Calculate how many new items we can add
+    const existingPaths = new Set(activeContext.map(c => c.path));
+    const trulyNewItems = items.filter(item => !existingPaths.has(item.path));
+    const replacementItems = items.filter(item => existingPaths.has(item.path));
+
+    // Count current items that won't be replaced
+    const remainingExisting = activeContext.filter(c => !items.some(item => item.path === c.path));
+    const availableSlots = MAX_CONTEXT_ITEMS - remainingExisting.length - replacementItems.length;
+
+    // Limit truly new items to available slots
+    const itemsToAdd = trulyNewItems.slice(0, Math.max(0, availableSlots));
+    const droppedCount = trulyNewItems.length - itemsToAdd.length;
+
+    // Show notification if some items were dropped
+    if (droppedCount > 0) {
+      showInfo(
+        'Attachment limit reached',
+        `Added ${itemsToAdd.length + replacementItems.length} of ${items.length} files. Maximum ${MAX_CONTEXT_ITEMS} allowed.`
+      );
+    }
+
+    // If nothing to add, just return
+    if (itemsToAdd.length === 0 && replacementItems.length === 0) return;
+
+    const allItemsToAdd = [...replacementItems, ...itemsToAdd];
+    const newItems: ContextItem[] = allItemsToAdd.map((item) => ({
       ...item,
       id: crypto.randomUUID(),
     }));
@@ -372,9 +414,11 @@ export const useChatStore = create<ChatState & ChatActions>()(
       }));
 
       // Convert messages to conversation history format
+      // Include contextItems so backend knows about previous attachments
       const conversationHistory = messages.map(m => ({
         role: m.role,
         content: m.content,
+        contextItems: m.contextItems || [],
       }));
 
       // Invoke backend command

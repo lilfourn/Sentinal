@@ -90,8 +90,9 @@ export function ChatInput() {
   }, []);
 
   // Debounced search function with race condition protection
+  // Searches from home directory by default for global file access
   const debouncedSearch = useCallback(
-    (query: string, directory: string) => {
+    (query: string, currentDirectory: string) => {
       // Clear any pending debounce
       if (debounceTimeoutRef.current) {
         clearTimeout(debounceTimeoutRef.current);
@@ -104,11 +105,16 @@ export function ChatInput() {
         try {
           setMentionLoading(true);
 
-          // Search current directory
+          // Get home directory for primary search (command is get_home_directory)
+          const homeDir = await invoke<string>('get_home_directory').catch(() => null);
+          const primaryDir = homeDir || currentDirectory;
+
+          // Search home directory first with recursive search enabled
           let results = await invoke<MentionItem[]>('list_files_for_mention', {
-            directory,
+            directory: primaryDir,
             query: query || null,
-            limit: 15,
+            max_results: 20,
+            recursive: true,
           });
 
           // Check if this search is still current (no newer search started)
@@ -116,13 +122,13 @@ export function ChatInput() {
             return; // Stale result, discard
           }
 
-          // If few results, also search home directory
-          const homeDir = await invoke<string>('get_home_dir').catch(() => null);
-          if (results.length < 5 && homeDir && directory !== homeDir) {
-            const homeResults = await invoke<MentionItem[]>('list_files_for_mention', {
-              directory: homeDir,
+          // Also search current directory if different from home (for quick access to browsed folder)
+          if (currentDirectory !== primaryDir) {
+            const currentDirResults = await invoke<MentionItem[]>('list_files_for_mention', {
+              directory: currentDirectory,
               query: query || null,
-              limit: 10,
+              max_results: 10,
+              recursive: true,
             });
 
             // Check again after second async operation
@@ -130,9 +136,9 @@ export function ChatInput() {
               return; // Stale result, discard
             }
 
-            // Dedupe and merge
-            const seen = new Set(results.map((r) => r.path));
-            results = [...results, ...homeResults.filter((r) => !seen.has(r.path))];
+            // Dedupe and merge - current directory results first for relevance
+            const seen = new Set(currentDirResults.map((r) => r.path));
+            results = [...currentDirResults, ...results.filter((r) => !seen.has(r.path))];
           }
 
           setMentionResults(results.slice(0, 15));

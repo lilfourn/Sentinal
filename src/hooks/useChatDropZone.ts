@@ -166,16 +166,36 @@ export function useChatDropZone(options: UseChatDropZoneOptions): UseChatDropZon
         setIsInternalDragOver(true);
         setDragSource('internal');
 
-        // Parse pending item from sentinel data for preview
-        const path = e.dataTransfer.getData('sentinel/path');
-        if (path && pendingItems.length === 0) {
-          const type = e.dataTransfer.getData('sentinel/type') as 'file' | 'folder';
-          const name = e.dataTransfer.getData('sentinel/name') || getFileName(path);
-          const sizeStr = e.dataTransfer.getData('sentinel/size');
-          const size = sizeStr ? parseInt(sizeStr, 10) : undefined;
-          const mimeType = e.dataTransfer.getData('sentinel/mime') || undefined;
+        // Parse pending items from sentinel data for preview
+        if (pendingItems.length === 0) {
+          // Try to get all items from sentinel/json first (multi-file drag)
+          const jsonData = e.dataTransfer.getData('sentinel/json');
+          if (jsonData) {
+            try {
+              const paths = JSON.parse(jsonData) as string[];
+              const items: PendingDropItem[] = paths.map((p) => ({
+                path: p,
+                name: getFileName(p),
+                type: 'unknown' as const,
+              }));
+              setPendingItems(items);
+              return;
+            } catch {
+              // Fall through to single-file handling
+            }
+          }
 
-          setPendingItems([{ path, name, type, size, mimeType }]);
+          // Fallback: single file from sentinel/path
+          const path = e.dataTransfer.getData('sentinel/path');
+          if (path) {
+            const type = e.dataTransfer.getData('sentinel/type') as 'file' | 'folder';
+            const name = e.dataTransfer.getData('sentinel/name') || getFileName(path);
+            const sizeStr = e.dataTransfer.getData('sentinel/size');
+            const size = sizeStr ? parseInt(sizeStr, 10) : undefined;
+            const mimeType = e.dataTransfer.getData('sentinel/mime') || undefined;
+
+            setPendingItems([{ path, name, type, size, mimeType }]);
+          }
         }
       } else if (hasExternal && !isDraggingExternal) {
         // External drag detected via browser event but not yet via Tauri
@@ -200,12 +220,73 @@ export function useChatDropZone(options: UseChatDropZoneOptions): UseChatDropZon
     [dragSource]
   );
 
+  /** Fetch metadata and add internal multi-file drop to context */
+  const handleInternalMultiDrop = useCallback(async (paths: string[]) => {
+    const contextItems: Omit<ContextItem, 'id'>[] = [];
+
+    for (const filePath of paths) {
+      try {
+        // Try to get metadata from backend
+        const metadata = await invoke<FileMetadata>('get_file_metadata', { path: filePath });
+
+        const type = metadata.isDirectory ? 'folder' : 'file';
+        const mimeType = metadata.mimeType || (isImagePath(filePath) ? 'image/*' : undefined);
+        const strategy = getContextStrategy(type, mimeType);
+
+        contextItems.push({
+          type: type === 'folder' ? 'folder' : isImagePath(filePath) ? 'image' : 'file',
+          path: metadata.path,
+          name: metadata.name,
+          strategy,
+          size: metadata.size,
+          mimeType,
+        });
+      } catch (error) {
+        console.error(`[useChatDropZone] Failed to get metadata for ${filePath}:`, error);
+
+        // Fallback: use path-based inference
+        const name = getFileName(filePath);
+        const isImage = isImagePath(filePath);
+
+        contextItems.push({
+          type: isImage ? 'image' : 'file',
+          path: filePath,
+          name,
+          strategy: isImage ? 'vision' : 'read',
+        });
+      }
+    }
+
+    if (contextItems.length > 0) {
+      onContextAddRef.current(contextItems);
+    }
+  }, []);
+
   /** Handle drop for internal drags */
   const handleDrop = useCallback(
     (e: React.DragEvent) => {
       e.preventDefault();
 
-      // Handle internal sentinel drag
+      // Try to get all items from sentinel/json first (multi-file drag)
+      const jsonData = e.dataTransfer.getData('sentinel/json');
+      if (jsonData) {
+        try {
+          const paths = JSON.parse(jsonData) as string[];
+          if (paths.length > 0) {
+            // Fetch metadata for all dropped files
+            handleInternalMultiDrop(paths);
+            // Reset state
+            setIsInternalDragOver(false);
+            setDragSource(null);
+            setPendingItems([]);
+            return;
+          }
+        } catch {
+          // Fall through to single-file handling
+        }
+      }
+
+      // Fallback: Handle single internal sentinel drag
       const path = e.dataTransfer.getData('sentinel/path');
       if (path) {
         const type = e.dataTransfer.getData('sentinel/type') as 'file' | 'folder';
@@ -233,7 +314,7 @@ export function useChatDropZone(options: UseChatDropZoneOptions): UseChatDropZon
       setDragSource(null);
       setPendingItems([]);
     },
-    []
+    [handleInternalMultiDrop]
   );
 
   // Determine overall drag state

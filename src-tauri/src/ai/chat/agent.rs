@@ -44,6 +44,9 @@ const ANTHROPIC_VERSION: &str = "2023-06-01";
 pub struct ConversationMessage {
     pub role: String,
     pub content: String,
+    /// Previous attachments (files, folders, images) from this message
+    #[serde(default)]
+    pub context_items: Vec<ContextItem>,
 }
 
 /// Streaming event types from Anthropic API
@@ -119,22 +122,28 @@ pub async fn run_chat_agent(
     // 2. Hydrate context (files → text, folders → holograms)
     let hydrated: HydratedContext = hydrate_context(context_items)?;
 
-    // 3. Build system prompt
-    let system_prompt = build_chat_system_prompt(&hydrated.system_addition);
+    // 3. Collect previous context references from history
+    let previous_context = collect_previous_context(history);
+    if !previous_context.is_empty() {
+        eprintln!("[ChatAgent] Found previous context from conversation history");
+    }
 
-    // 4. Build message history
+    // 4. Build system prompt with previous context
+    let system_prompt = build_chat_system_prompt(&hydrated.system_addition, &previous_context);
+
+    // 5. Build message history
     let mut messages = build_message_history(history, message, &hydrated)?;
 
-    // 5. Get available tools
+    // 6. Get available tools
     let tools = get_chat_tools();
 
-    // 6. Create HTTP client with timeout
+    // 7. Create HTTP client with timeout
     let client = Client::builder()
         .timeout(Duration::from_secs(120))
         .build()
         .map_err(|e| format!("Failed to create HTTP client: {}", e))?;
 
-    // 7. ReAct Loop with streaming
+    // 8. ReAct Loop with streaming
     let mut final_response = String::new();
 
     for iteration in 0..MAX_ITERATIONS {
@@ -220,7 +229,7 @@ pub async fn run_chat_agent(
         }
     }
 
-    // 8. Emit completion
+    // 9. Emit completion
     app.emit("chat:complete", json!({}))
         .map_err(|e| format!("Event emit failed: {}", e))?;
 
@@ -529,7 +538,7 @@ async fn process_stream(
 }
 
 /// Build the chat system prompt
-fn build_chat_system_prompt(context_addition: &str) -> String {
+fn build_chat_system_prompt(context_addition: &str, previous_context: &str) -> String {
     format!(
         r#"You are Sentinel Chat, an intelligent assistant for file management and organization.
 
@@ -552,9 +561,41 @@ fn build_chat_system_prompt(context_addition: &str) -> String {
 ## Security
 - Only access files the user has shared or in allowed directories
 - Destructive commands are blocked for safety
-{}"#,
-        context_addition
+{}{}"#,
+        previous_context, context_addition
     )
+}
+
+/// Collect references to files attached in previous messages
+fn collect_previous_context(history: &[ConversationMessage]) -> String {
+    let mut context_refs: Vec<(String, String)> = Vec::new(); // (name, path)
+
+    // Collect context from recent user messages (last 10 messages)
+    for msg in history.iter().rev().take(10) {
+        if msg.role == "user" && !msg.context_items.is_empty() {
+            for item in &msg.context_items {
+                // Avoid duplicates
+                if !context_refs.iter().any(|(_, p)| p == &item.path) {
+                    context_refs.push((item.name.clone(), item.path.clone()));
+                }
+            }
+        }
+    }
+
+    if context_refs.is_empty() {
+        return String::new();
+    }
+
+    // Build a section informing the AI about previously attached files
+    let mut section = String::from("\n\n## Previously Attached Files\n");
+    section.push_str("The user has attached these files in earlier messages in this conversation. ");
+    section.push_str("Use the `read_file` tool if you need to access their content:\n\n");
+
+    for (name, path) in &context_refs {
+        section.push_str(&format!("- `{}` at `{}`\n", name, path));
+    }
+
+    section
 }
 
 /// Build message history for API request
@@ -621,7 +662,7 @@ mod tests {
 
     #[test]
     fn test_build_system_prompt() {
-        let prompt = build_chat_system_prompt("");
+        let prompt = build_chat_system_prompt("", "");
         assert!(prompt.contains("Sentinel Chat"));
         assert!(prompt.contains("search_hybrid"));
     }
@@ -629,8 +670,64 @@ mod tests {
     #[test]
     fn test_build_system_prompt_with_context() {
         let context = "\n\n## User Context\n\nFile: test.txt";
-        let prompt = build_chat_system_prompt(context);
+        let prompt = build_chat_system_prompt(context, "");
         assert!(prompt.contains("User Context"));
         assert!(prompt.contains("test.txt"));
+    }
+
+    #[test]
+    fn test_build_system_prompt_with_previous_context() {
+        let previous = "\n\n## Previously Attached Files\n- `doc.pdf` at `/path/doc.pdf`\n";
+        let prompt = build_chat_system_prompt("", previous);
+        assert!(prompt.contains("Previously Attached Files"));
+        assert!(prompt.contains("doc.pdf"));
+    }
+
+    #[test]
+    fn test_collect_previous_context() {
+        let history = vec![
+            ConversationMessage {
+                role: "user".to_string(),
+                content: "analyze this file".to_string(),
+                context_items: vec![ContextItem {
+                    id: "1".to_string(),
+                    item_type: "file".to_string(),
+                    path: "/docs/report.pdf".to_string(),
+                    name: "report.pdf".to_string(),
+                    strategy: "read".to_string(),
+                    size: Some(1024),
+                    mime_type: Some("application/pdf".to_string()),
+                }],
+            },
+            ConversationMessage {
+                role: "assistant".to_string(),
+                content: "I analyzed the file".to_string(),
+                context_items: vec![],
+            },
+            ConversationMessage {
+                role: "user".to_string(),
+                content: "what about page 5?".to_string(),
+                context_items: vec![],
+            },
+        ];
+
+        let context = collect_previous_context(&history);
+        assert!(context.contains("Previously Attached Files"));
+        assert!(context.contains("report.pdf"));
+        assert!(context.contains("/docs/report.pdf"));
+    }
+
+    #[test]
+    fn test_collect_previous_context_empty() {
+        let history = vec![
+            ConversationMessage {
+                role: "user".to_string(),
+                content: "hello".to_string(),
+                context_items: vec![],
+            },
+        ];
+
+        let context = collect_previous_context(&history);
+        assert!(context.is_empty());
     }
 }

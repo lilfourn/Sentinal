@@ -74,6 +74,40 @@ NOT file.isHidden AND file.ext == 'txt'
 file.vector_similarity('tax document') > 0.7
 ```
 
+## COMMON MISTAKES TO AVOID
+
+These patterns are INVALID and will cause parsing errors:
+
+```
+# WRONG: Missing field name after 'file.'
+file. == 'pdf'                    # Should be: file.ext == 'pdf'
+
+# WRONG: Using parentheses on field names (fields are NOT functions)
+file.ext() == 'pdf'               # Should be: file.ext == 'pdf'
+file.name() == 'test'             # Should be: file.name == 'test'
+
+# WRONG: Using 'extension' instead of 'ext'
+file.extension == 'pdf'           # Should be: file.ext == 'pdf'
+
+# WRONG: Missing quotes around string values
+file.ext == pdf                   # Should be: file.ext == 'pdf'
+file.name.contains(invoice)       # Should be: file.name.contains('invoice')
+
+# WRONG: Using single = instead of ==
+file.ext = 'pdf'                  # Should be: file.ext == 'pdf'
+
+# WRONG: Calling methods on simple fields
+file.ext.contains('pd')           # WRONG: ext is a string, use == or IN
+                                  # Should be: file.ext == 'pdf'
+
+# WRONG: Using non-existent function names
+file.name.has('test')             # Should be: file.name.contains('test')
+file.name.start('test')           # Should be: file.name.startsWith('test')
+```
+
+Valid fields: `name`, `ext`, `size`, `path`, `modifiedAt`, `createdAt`, `mimeType`, `isHidden`
+Valid functions (on file.name only): `contains()`, `startsWith()`, `endsWith()`, `matches()`
+
 ## WORKFLOW
 
 1. **Understand** - Start with query_semantic_index to understand what files exist
@@ -286,6 +320,21 @@ file.ext IN ['mp3', 'wav', 'flac', 'm4a']          // All audio
 file.size > 100MB                                   // Large files
 ```
 
+### COMMON MISTAKES TO AVOID
+```
+# WRONG: Missing field after 'file.'
+file. == 'pdf'                    # Should be: file.ext == 'pdf'
+
+# WRONG: Parentheses on fields
+file.ext() == 'pdf'               # Should be: file.ext == 'pdf'
+
+# WRONG: Missing quotes
+file.ext == pdf                   # Should be: file.ext == 'pdf'
+
+# WRONG: Single = instead of ==
+file.ext = 'pdf'                  # Should be: file.ext == 'pdf'
+```
+
 ## WORKFLOW FOR LARGE FOLDERS
 
 1. **Review Statistics** - Look at extension breakdown AND file name patterns
@@ -438,6 +487,21 @@ Use broad extension rules BUT with CONTENT-SPECIFIC folder names:
 - `file.ext IN ['jpg', 'png'] AND file.name.contains('site')` → "Construction-Site-Photos/"
 - `file.ext == 'pdf' AND file.name.contains('permit')` → "Building-Permits/"
 - `file.ext IN ['doc', 'docx'] AND file.name.startsWith('contract')` → "Vendor-Contracts/"
+
+### COMMON MISTAKES TO AVOID
+```
+# WRONG: Missing field after 'file.'
+file. == 'pdf'                    # Should be: file.ext == 'pdf'
+
+# WRONG: Parentheses on fields
+file.ext() == 'pdf'               # Should be: file.ext == 'pdf'
+
+# WRONG: Missing quotes
+file.ext == pdf                   # Should be: file.ext == 'pdf'
+
+# WRONG: Single = instead of ==
+file.ext = 'pdf'                  # Should be: file.ext == 'pdf'
+```
 
 Derive folder names from the PATTERNS you see:
 - Pattern `IMG_[0001..5000].jpg` with dates in 2024 → "2024-Photo-Archive/"

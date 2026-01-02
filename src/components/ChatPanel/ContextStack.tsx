@@ -1,5 +1,5 @@
 import { X, File, Folder, Image } from 'lucide-react';
-import { useChatStore, formatSize } from '../../stores/chat-store';
+import { useChatStore, formatSize, MAX_CONTEXT_ITEMS } from '../../stores/chat-store';
 import type { ContextItem } from '../../stores/chat-store';
 
 function ContextChip({ item, onRemove }: { item: ContextItem; onRemove: () => void }) {
@@ -55,7 +55,10 @@ export function ContextStack() {
     <div className="px-3 py-2 pt-10 border-b border-white/5 bg-white/[0.02]">
       <div className="flex items-center justify-between mb-1.5">
         <span className="text-[10px] uppercase tracking-wider text-gray-500">
-          Context ({activeContext.length})
+          Context{' '}
+          <span className={activeContext.length >= MAX_CONTEXT_ITEMS ? 'text-orange-400' : ''}>
+            ({activeContext.length}/{MAX_CONTEXT_ITEMS})
+          </span>
         </span>
         {activeContext.length > 1 && (
           <button
