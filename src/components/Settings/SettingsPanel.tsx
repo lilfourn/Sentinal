@@ -205,26 +205,26 @@ export function SettingsPanel({ isOpen, onClose }: SettingsPanelProps) {
 
 /**
  * Subscription management section
+ * Note: Subscription data is synced from Convex via AuthSync component.
+ * We don't call syncSubscription() here as it would fetch stale data from Rust cache.
  */
 function SubscriptionSection() {
   const {
     tier,
     status,
     currentPeriodEnd,
+    cancelAtPeriodEnd,
     isLoading,
     openCheckout,
     openCustomerPortal,
-    syncSubscription,
   } = useSubscriptionStore();
-
-  // Sync on mount
-  useEffect(() => {
-    syncSubscription();
-  }, [syncSubscription]);
 
   const periodEndDate = currentPeriodEnd
     ? new Date(currentPeriodEnd).toLocaleDateString()
     : null;
+
+  // User is Pro but has cancelled - will downgrade at period end
+  const isCancelling = tier === 'pro' && cancelAtPeriodEnd && status === 'active';
 
   return (
     <section>
@@ -240,23 +240,25 @@ function SubscriptionSection() {
               Current Plan
             </span>
             <PlanBadge size="md" />
-            <button
-              onClick={() => {
-                console.log("[Settings] Manual subscription refresh");
-                syncSubscription();
-              }}
-              disabled={isLoading}
-              className="text-xs text-blue-500 hover:text-blue-400 disabled:opacity-50"
-            >
-              Refresh
-            </button>
           </div>
           {tier === 'pro' && status === 'active' && periodEndDate && (
-            <span className="text-xs text-gray-500">
-              Renews {periodEndDate}
+            <span className={cn(
+              "text-xs",
+              isCancelling ? "text-amber-500" : "text-gray-500"
+            )}>
+              {isCancelling ? `Cancels ${periodEndDate}` : `Renews ${periodEndDate}`}
             </span>
           )}
         </div>
+
+        {/* Cancellation notice */}
+        {isCancelling && (
+          <div className="p-3 bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-800 rounded-lg">
+            <p className="text-xs text-amber-700 dark:text-amber-300">
+              Your subscription has been cancelled. You'll continue to have Pro access until {periodEndDate}.
+            </p>
+          </div>
+        )}
 
         {/* Usage dashboard */}
         <div className="p-3 bg-gray-100 dark:bg-[#1a1a1a] rounded-lg">

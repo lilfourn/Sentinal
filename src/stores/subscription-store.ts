@@ -124,6 +124,8 @@ interface SubscriptionState {
   status: SubscriptionStatus;
   stripeCustomerId: string | null;
   currentPeriodEnd: number | null;
+  /** True if user has cancelled but still has access until period end */
+  cancelAtPeriodEnd: boolean;
 
   // Usage tracking
   usage: DailyUsage;
@@ -182,6 +184,7 @@ const initialState: SubscriptionState = {
   status: 'active',
   stripeCustomerId: null,
   currentPeriodEnd: null,
+  cancelAtPeriodEnd: false,
   usage: initialUsage,
   isLoading: false,
   lastSyncedAt: null,

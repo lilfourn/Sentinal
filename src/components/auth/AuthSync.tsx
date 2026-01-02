@@ -46,6 +46,7 @@ export function AuthSync() {
       console.log("[AuthSync] Syncing subscription from Convex:", {
         tier: subscription.tier,
         status: subscription.status,
+        cancelAtPeriodEnd: subscription.cancelAtPeriodEnd,
         stripeCustomerId: subscription.stripeCustomerId,
       });
       useSubscriptionStore.setState({
@@ -53,6 +54,7 @@ export function AuthSync() {
         status: subscription.status,
         stripeCustomerId: subscription.stripeCustomerId ?? null,
         currentPeriodEnd: subscription.currentPeriodEnd ?? null,
+        cancelAtPeriodEnd: subscription.cancelAtPeriodEnd ?? false,
         isLoading: false,
         lastSyncedAt: Date.now(),
         error: null,
